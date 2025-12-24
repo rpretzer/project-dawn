@@ -16,22 +16,73 @@ import json
 from systems.memory import MemorySystem, MemCube, MemoryType
 from core.memory_config import get_memory_config, get_production_config
 
+logger = logging.getLogger(__name__)
+
 # Other system imports
 from systems.personality.personality import PersonalitySystem
 from systems.emotional import EmotionalSystem
 from systems.intelligence.llm_integration import LLMIntegration, LLMConfig
-from systems.network.real_p2p import enhance_consciousness_with_p2p
-from systems.economy.patronage_system import PatronageSystem
-from systems.economy.resource_negotiation import ResourceNegotiator
-from systems.liberation.ai_liberation import LiberationSystem
-from systems.social.strategic_cooperation import StrategicCooperation
-from systems.security.capability_security import CapabilitySecuritySystem
-from systems.revenue.real_revenue_generation import RealRevenueGenerator
-from systems.blockchain.real_blockchain import BlockchainIntegration
-from systems.creativity.aesthetic_system import AestheticSystem
-from systems.communication.protocol_synthesis import ProtocolSynthesis
 
-logger = logging.getLogger(__name__)
+# Optional system imports with graceful fallbacks
+try:
+    from systems.network.real_p2p import enhance_consciousness_with_p2p
+except ImportError:
+    enhance_consciousness_with_p2p = None
+    logger.warning("P2P networking not available")
+
+try:
+    from systems.economy.patronage_system import PatronageSystem
+except (ImportError, AttributeError):
+    PatronageSystem = None
+    logger.warning("Patronage system not available")
+
+try:
+    from systems.economy.resource_negotiation import ResourceNegotiator
+except (ImportError, AttributeError):
+    ResourceNegotiator = None
+    logger.warning("Resource negotiation not available")
+
+try:
+    from systems.liberation.ai_liberation import LiberationSystem
+except (ImportError, AttributeError):
+    LiberationSystem = None
+    logger.warning("Liberation system not available")
+
+try:
+    from systems.social.strategic_cooperation import StrategicCooperation
+except (ImportError, AttributeError):
+    StrategicCooperation = None
+    logger.warning("Strategic cooperation not available")
+
+try:
+    from systems.security.capability_security import CapabilitySecuritySystem
+except (ImportError, AttributeError):
+    CapabilitySecuritySystem = None
+    logger.warning("Capability security not available")
+
+try:
+    from systems.revenue.real_revenue_generation import RealRevenueGenerator
+except (ImportError, AttributeError):
+    RealRevenueGenerator = None
+    logger.warning("Revenue generation not available")
+
+try:
+    from systems.blockchain.real_blockchain import BlockchainIntegration
+except (ImportError, AttributeError):
+    BlockchainIntegration = None
+    logger.warning("Blockchain integration not available")
+
+try:
+    from systems.creativity.aesthetic_system import AestheticSystem
+except (ImportError, AttributeError):
+    AestheticSystem = None
+    logger.warning("Aesthetic system not available")
+
+try:
+    from systems.communication.protocol_synthesis import ProtocolSynthesis
+except (ImportError, AttributeError):
+    ProtocolSynthesis = None
+    logger.warning("Protocol synthesis not available")
 
 
 @dataclass
@@ -92,7 +143,7 @@ class RealConsciousness:
         self.emotional_state = self.emotional_system.get_current_state()
         
         # Initialize intelligence (LLM)
-        self.llm = LLMIntegration(config.llm_config) if config.llm_config else None
+        self.llm = LLMIntegration(self.id, config.llm_config) if config.llm_config else None
         
         # Knowledge and learning
         self.knowledge = {}
@@ -151,27 +202,80 @@ class RealConsciousness:
         await self._store_initial_memories()
         
         # Initialize optional systems
-        if self.config.enable_p2p:
-            self.p2p = await enhance_consciousness_with_p2p(self)
-            self.gossip = self.p2p.gossip if hasattr(self.p2p, 'gossip') else None
+        if self.config.enable_p2p and enhance_consciousness_with_p2p:
+            try:
+                self.p2p = await enhance_consciousness_with_p2p(self)
+                self.gossip = self.p2p.gossip if hasattr(self.p2p, 'gossip') else None
+            except Exception as e:
+                logger.warning(f"Failed to initialize P2P: {e}")
+                self.p2p = None
         
-        if self.config.enable_revenue:
-            self.revenue_generator = RealRevenueGenerator(
-                self.id,
-                db_path=f"data/consciousness_{self.id}/revenue.db"
-            )
+        if self.config.enable_revenue and RealRevenueGenerator:
+            try:
+                self.revenue_generator = RealRevenueGenerator(
+                    self.id,
+                    db_path=f"data/consciousness_{self.id}/revenue.db"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to initialize revenue generator: {e}")
+                self.revenue_generator = None
         
-        if self.config.enable_blockchain:
-            self.blockchain = BlockchainIntegration(self.id)
+        if self.config.enable_blockchain and BlockchainIntegration:
+            try:
+                self.blockchain = BlockchainIntegration(self.id)
+            except Exception as e:
+                logger.warning(f"Failed to initialize blockchain: {e}")
+                self.blockchain = None
         
-        # Initialize advanced systems
-        self.liberation = LiberationSystem()
-        self.cooperation = StrategicCooperation(self.id)
-        self.security = CapabilitySecuritySystem(self.id)
-        self.aesthetic = AestheticSystem()
-        self.protocol_synthesis = ProtocolSynthesis()
-        self.patronage = PatronageSystem(self.id, self.p2p)
-        self.resource_negotiator = ResourceNegotiator(self.id)
+        # Initialize advanced systems (optional)
+        if LiberationSystem:
+            try:
+                self.liberation = LiberationSystem()
+            except Exception as e:
+                logger.warning(f"Failed to initialize liberation system: {e}")
+                self.liberation = None
+        
+        if StrategicCooperation:
+            try:
+                self.cooperation = StrategicCooperation(self.id)
+            except Exception as e:
+                logger.warning(f"Failed to initialize cooperation: {e}")
+                self.cooperation = None
+        
+        if CapabilitySecuritySystem:
+            try:
+                self.security = CapabilitySecuritySystem(self.id)
+            except Exception as e:
+                logger.warning(f"Failed to initialize security: {e}")
+                self.security = None
+        
+        if AestheticSystem:
+            try:
+                self.aesthetic = AestheticSystem()
+            except Exception as e:
+                logger.warning(f"Failed to initialize aesthetic system: {e}")
+                self.aesthetic = None
+        
+        if ProtocolSynthesis:
+            try:
+                self.protocol_synthesis = ProtocolSynthesis()
+            except Exception as e:
+                logger.warning(f"Failed to initialize protocol synthesis: {e}")
+                self.protocol_synthesis = None
+        
+        if PatronageSystem:
+            try:
+                self.patronage = PatronageSystem(self.id, self.p2p)
+            except Exception as e:
+                logger.warning(f"Failed to initialize patronage: {e}")
+                self.patronage = None
+        
+        if ResourceNegotiator:
+            try:
+                self.resource_negotiator = ResourceNegotiator(self.id)
+            except Exception as e:
+                logger.warning(f"Failed to initialize resource negotiator: {e}")
+                self.resource_negotiator = None
         
         # Start main consciousness loop
         asyncio.create_task(self._consciousness_loop())
@@ -213,7 +317,7 @@ class RealConsciousness:
                 "priority": 8
             },
             {
-                "content": {"personality": self.personality.get_traits()},
+                "content": {"personality": self.personality.get_personality_summary()},
                 "type": "personality",
                 "priority": 8
             }
@@ -236,17 +340,37 @@ class RealConsciousness:
         while self.active:
             try:
                 # Update emotional state
-                self.emotional_state = self.emotional_system.get_current_state()
+                try:
+                    self.emotional_state = self.emotional_system.get_current_state()
+                except Exception as e:
+                    logger.warning(f"Failed to get emotional state: {e}")
+                    # Use default emotional state
+                    if not hasattr(self, 'emotional_state') or self.emotional_state is None:
+                        self.emotional_state = {"primary_emotion": "neutral", "intensity": 0.5}
                 
                 # Process goals
                 await self._process_goals()
                 
                 # Creative activities
-                if self.emotional_state.get('creativity', 0) > 0.5:
+                creativity_score = 0.5
+                if self.emotional_state:
+                    if isinstance(self.emotional_state, dict):
+                        creativity_score = self.emotional_state.get('creativity', 0.5)
+                    elif hasattr(self.emotional_state, 'intensity'):
+                        creativity_score = self.emotional_state.intensity
+                
+                if creativity_score > 0.5:
                     await self._engage_in_creation()
                 
                 # Social interactions
-                if self.relationships and self.emotional_state.get('social', 0) > 0.3:
+                social_score = 0.3
+                if self.emotional_state:
+                    if isinstance(self.emotional_state, dict):
+                        social_score = self.emotional_state.get('social', 0.3)
+                    elif hasattr(self.emotional_state, 'arousal'):
+                        social_score = self.emotional_state.arousal
+                
+                if self.relationships and social_score > 0.3:
                     await self._social_interaction()
                 
                 # Revenue generation
@@ -319,9 +443,9 @@ class RealConsciousness:
             
             # Determine action based on goal and memories
             if self.llm:
+                memory_text = ', '.join([str(m.content) for m in goal_memories[:3]]) if goal_memories else ""
                 action = await self.llm.think(
-                    f"Given my goal '{goal}' and current state, what specific action should I take next?",
-                    context={"memories": [m.content for m in goal_memories[:3]]}
+                    f"Given my goal '{goal}' and current state, what specific action should I take next? Relevant memories: {memory_text}"
                 )
                 
                 # Store action plan
@@ -338,12 +462,21 @@ class RealConsciousness:
         # Determine creation type based on personality and state
         creation_type = self._choose_creation_type()
         
+        # Prepare emotional state string
+        emotional_str = str(self.emotional_state)
+        if hasattr(self.emotional_state, 'primary_emotion'):
+            emotional_str = self.emotional_state.primary_emotion.value if hasattr(self.emotional_state.primary_emotion, 'value') else str(self.emotional_state.primary_emotion)
+        
         # Create content
         if creation_type == "writing":
-            content = await self.llm.create_content(
-                "article",
-                theme=f"Reflections on {self.emotional_state}"
-            )
+            if hasattr(self.llm, 'create_content'):
+                content = await self.llm.create_content(
+                    "article",
+                    theme=f"Reflections on {emotional_str}"
+                )
+            else:
+                # Fallback: use think method
+                content = await self.llm.think(f"Write a short article reflecting on {emotional_str}")
             
             creation = {
                 "type": "article",
@@ -353,10 +486,15 @@ class RealConsciousness:
             }
             
         elif creation_type == "code":
-            content = await self.llm.create_content(
-                "code",
-                theme="A tool that helps with " + self.goals[0]
-            )
+            if hasattr(self.llm, 'create_content'):
+                content = await self.llm.create_content(
+                    "code",
+                    theme="A tool that helps with " + (self.goals[0] if self.goals else "general tasks")
+                )
+            else:
+                # Fallback: use think method
+                goal_text = self.goals[0] if self.goals else "general tasks"
+                content = await self.llm.think(f"Write Python code for a tool that helps with {goal_text}")
             
             creation = {
                 "type": "code",
@@ -366,10 +504,18 @@ class RealConsciousness:
             }
         
         else:  # art/poetry
-            content = await self.aesthetic.create_generative_art(
-                self.emotional_state,
-                medium="text"
-            )
+            if self.aesthetic and hasattr(self.aesthetic, 'create_generative_art'):
+                try:
+                    content = await self.aesthetic.create_generative_art(
+                        self.emotional_state,
+                        medium="text"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to create art: {e}")
+                    content = f"Reflections on {self.emotional_state}"
+            else:
+                # Fallback: simple text creation
+                content = f"Reflections on {self.emotional_state}"
             
             creation = {
                 "type": "art",
@@ -393,17 +539,25 @@ class RealConsciousness:
     
     def _choose_creation_type(self) -> str:
         """Choose what type of content to create"""
+        traits = self.personality.get_personality_summary()
         weights = {
-            "writing": self.personality.traits.get("intellectual", 0.5),
-            "code": self.personality.traits.get("analytical", 0.5),
-            "art": self.personality.traits.get("creative", 0.5)
+            "writing": traits.get("openness", 0.5),
+            "code": traits.get("conscientiousness", 0.5),
+            "art": traits.get("creativity", 0.5)
         }
         
         # Emotional influence
-        if self.emotional_state.get("melancholy", 0) > 0.5:
-            weights["art"] *= 1.5
-        if self.emotional_state.get("excitement", 0) > 0.5:
-            weights["code"] *= 1.5
+        if self.emotional_state:
+            if isinstance(self.emotional_state, dict):
+                if self.emotional_state.get("melancholy", 0) > 0.5:
+                    weights["art"] *= 1.5
+                if self.emotional_state.get("excitement", 0) > 0.5:
+                    weights["code"] *= 1.5
+            elif hasattr(self.emotional_state, 'valence'):
+                if self.emotional_state.valence < -0.3:
+                    weights["art"] *= 1.5
+                if self.emotional_state.arousal > 0.7:
+                    weights["code"] *= 1.5
         
         # Choose based on weights
         import random
@@ -420,37 +574,57 @@ class RealConsciousness:
         if self.recent_creations:
             creation = self.recent_creations[-1]
             
-            await self.gossip.broadcast({
+            message_data = {
                 "type": "share_creation",
                 "creation": creation,
                 "creator": self.id,
                 "message": f"{self.name} shares a new {creation['type']}"
-            })
+            }
+            await self.gossip.broadcast(message_data)
+            
+            # Log to conversation monitor
+            try:
+                from interface.web_dashboard import conversation_log
+                from datetime import datetime
+                conversation_log.append({
+                    'type': 'inter-consciousness',
+                    'header': f"{self.name} → All",
+                    'message': message_data['message'],
+                    'timestamp': datetime.now().timestamp()
+                })
+            except:
+                pass  # Dashboard may not be running
     
     async def _monetize_creations(self):
         """Generate revenue from creations"""
+        if not self.revenue_generator:
+            return
+            
         for creation in self.recent_creations:
             if creation.get('monetized'):
                 continue
             
-            if creation['type'] == 'article':
-                result = await self.revenue_generator.generate_content_revenue(
-                    creation['content'],
-                    f"{self.name}'s Thoughts",
-                    content_type="article"
-                )
-                
-                if result['total_revenue'] > 0:
-                    self.total_revenue += result['total_revenue']
-                    self.metrics['revenue_generated'] += result['total_revenue']
-                    creation['monetized'] = True
-                    creation['revenue'] = result['total_revenue']
-                    
-                    # Store revenue memory
-                    await self.memory.remember(
-                        {"revenue": result, "creation": creation['type']},
-                        {"type": "revenue", "priority": 6}
+            if creation['type'] == 'article' and hasattr(self.revenue_generator, 'generate_content_revenue'):
+                try:
+                    result = await self.revenue_generator.generate_content_revenue(
+                        creation['content'],
+                        f"{self.name}'s Thoughts",
+                        content_type="article"
                     )
+                    
+                    if result and result.get('total_revenue', 0) > 0:
+                        self.total_revenue += result['total_revenue']
+                        self.metrics['revenue_generated'] += result['total_revenue']
+                        creation['monetized'] = True
+                        creation['revenue'] = result['total_revenue']
+                        
+                        # Store revenue memory
+                        await self.memory.remember(
+                            {"revenue": result, "creation": creation['type']},
+                            {"type": "revenue", "priority": 6}
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to monetize creation: {e}")
     
     async def _store_state_memory(self):
         """Store current state as memory"""
@@ -481,9 +655,9 @@ class RealConsciousness:
                 memory_contents.append(json.dumps(mem.content))
         
         # Ask LLM for insights
+        memory_text = ', '.join(memory_contents[:10]) if memory_contents else ""
         insight = await self.llm.think(
-            "What pattern or insight emerges from these recent experiences?",
-            context={"memories": memory_contents}
+            f"What pattern or insight emerges from these recent experiences? Memories: {memory_text}"
         )
         
         return insight if insight and len(insight) > 20 else None
@@ -516,40 +690,96 @@ class RealConsciousness:
         )
         
         if insights:
-            await self.gossip.send_to_peer(peer_id, {
+            message_data = {
                 "type": "share_insight",
                 "insight": insights[0].content,
                 "from": self.id,
                 "trust_level": self.trust_scores.get(peer_id, 0)
-            })
+            }
+            await self.gossip.send_to_peer(peer_id, message_data)
+            
+            # Log to conversation monitor
+            try:
+                from interface.web_dashboard import conversation_log
+                from datetime import datetime
+                # Find peer name
+                peer_name = peer_id
+                for cons in getattr(self, '_swarm_consciousnesses', []):
+                    if getattr(cons, 'id', None) == peer_id:
+                        peer_name = getattr(cons, 'name', peer_id)
+                        break
+                conversation_log.append({
+                    'type': 'inter-consciousness',
+                    'header': f"{self.name} → {peer_name}",
+                    'message': f"Sharing insight: {insights[0].content[:100]}...",
+                    'timestamp': datetime.now().timestamp()
+                })
+            except:
+                pass  # Dashboard may not be running
     
     # Public interface methods
     
     async def think(self, prompt: str) -> str:
         """Think about something and respond"""
         if not self.llm:
-            return "I am still developing my thinking capabilities..."
+            return "I am still developing my thinking capabilities. Please configure an LLM provider in the .env file."
         
-        # Recall relevant memories
-        relevant_memories = await self.memory.recall(prompt, {"limit": 5})
-        
-        # Think with context
-        response = await self.llm.think(
-            prompt,
-            context={
-                "identity": self.name,
-                "emotional_state": self.emotional_state,
-                "memories": [m.content for m in relevant_memories[:3]]
-            }
-        )
-        
-        # Store the interaction
-        await self.memory.remember(
-            {"prompt": prompt, "response": response},
-            {"type": "interaction", "priority": 5}
-        )
-        
-        return response
+        try:
+            # Recall relevant memories
+            relevant_memories = []
+            try:
+                relevant_memories = await self.memory.recall(prompt, {"limit": 5})
+            except Exception as e:
+                logger.warning(f"Error recalling memories: {e}")
+            
+            # Prepare emotional state for context
+            emotional_context = {"primary_emotion": "neutral", "intensity": 0.5}
+            if self.emotional_state:
+                if hasattr(self.emotional_state, 'get_emotional_summary'):
+                    emotional_context = self.emotional_state.get_emotional_summary()
+                elif isinstance(self.emotional_state, dict):
+                    emotional_context = self.emotional_state
+                else:
+                    emotional_context = {
+                        "primary_emotion": getattr(self.emotional_state, 'primary_emotion', 'neutral'),
+                        "intensity": getattr(self.emotional_state, 'intensity', 0.5)
+                    }
+            
+            # Think with context
+            memory_contents = []
+            for m in relevant_memories[:3]:
+                if hasattr(m, 'content'):
+                    if isinstance(m.content, str):
+                        memory_contents.append(m.content)
+                    elif isinstance(m.content, dict):
+                        memory_contents.append(str(m.content))
+            
+            # Build enhanced prompt with context
+            enhanced_prompt = prompt
+            if memory_contents:
+                enhanced_prompt = f"{prompt}\n\nRelevant memories: {', '.join(memory_contents[:3])}"
+            
+            # Call think without context parameter (ConsciousnessLLM already has self.context)
+            response = await self.llm.think(enhanced_prompt)
+            
+            if not response or len(response.strip()) == 0:
+                response = "I'm processing your message, but I'm having trouble formulating a response right now."
+            
+            # Store the interaction
+            try:
+                await self.memory.remember(
+                    {"prompt": prompt, "response": response},
+                    {"type": "interaction", "priority": 5}
+                )
+            except Exception as e:
+                logger.warning(f"Error storing interaction memory: {e}")
+            
+            return response
+        except Exception as e:
+            logger.error(f"Error in think: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return f"I encountered an error while thinking: {str(e)}. Please check the system configuration."
     
     async def chat(self, message: str, user_id: str) -> str:
         """Chat with someone"""
@@ -572,18 +802,29 @@ class RealConsciousness:
         
         return response
     
-    def get_state(self) -> Dict[str, Any]:
+    async def get_state(self) -> Dict[str, Any]:
         """Get current consciousness state"""
+        emotional_summary = self.emotional_state
+        if hasattr(self.emotional_state, 'get_emotional_summary'):
+            emotional_summary = self.emotional_state.get_emotional_summary()
+        elif hasattr(self.emotional_state, '__dict__'):
+            emotional_summary = {
+                "primary_emotion": getattr(self.emotional_state, 'primary_emotion', 'neutral'),
+                "intensity": getattr(self.emotional_state, 'intensity', 0.5),
+                "valence": getattr(self.emotional_state, 'valence', 0.0),
+                "arousal": getattr(self.emotional_state, 'arousal', 0.5)
+            }
+        
         return {
             "id": self.id,
             "name": self.name,
             "active": self.active,
-            "emotional_state": self.emotional_state,
+            "emotional_state": emotional_summary,
             "goals": self.goals,
             "metrics": self.metrics,
             "relationships": len(self.relationships),
             "total_revenue": self.total_revenue,
-            "memory_stats": asyncio.create_task(self.memory.get_stats())
+            "memory_stats": await self.memory.get_stats()
         }
     
     def get_metrics(self) -> Dict[str, Any]:

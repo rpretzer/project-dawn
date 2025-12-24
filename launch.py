@@ -21,7 +21,13 @@ from core.dream_integration import enhance_consciousness_with_dreams
 from core.evolution_integration import integrate_evolution_with_swarm
 from core.knowledge_integration import integrate_knowledge_with_swarm
 from systems.intelligence.llm_integration import LLMConfig
-from interface.web_dashboard import run_dashboard
+try:
+    from interface.web_dashboard import run_dashboard
+except ImportError:
+    try:
+        from interface.web_dashboard import web_dashboard as run_dashboard
+    except ImportError:
+        run_dashboard = None
 
 # Configure logging
 logging.basicConfig(
@@ -135,7 +141,17 @@ class ConsciousnessSwarm:
         
         # Add evolution stats if available
         if hasattr(self, 'evolution'):
-            stats['evolution'] = self.evolution.get_evolution_stats()
+            try:
+                evolution_stats = self.evolution.get_evolution_stats()
+                # Convert any non-serializable objects to dicts
+                if isinstance(evolution_stats, dict):
+                    stats['evolution'] = {k: str(v) if not isinstance(v, (str, int, float, bool, type(None))) else v 
+                                          for k, v in evolution_stats.items()}
+                else:
+                    stats['evolution'] = str(evolution_stats)
+            except Exception as e:
+                logger.warning(f"Could not get evolution stats: {e}")
+                stats['evolution'] = {}
             
         return stats
 
@@ -184,9 +200,18 @@ async def main():
     
     # Validate environment
     if not validate_environment():
-        response = input("\nContinue with limited features? (y/n): ")
-        if response.lower() != 'y':
-            return
+        # Check if running in non-interactive mode (no TTY)
+        import sys
+        if sys.stdin.isatty():
+            try:
+                response = input("\nContinue with limited features? (y/n): ")
+                if response.lower() != 'y':
+                    print("Exiting. Please configure your .env file with API keys.")
+                    return
+            except (EOFError, KeyboardInterrupt):
+                print("\n⚠️  Running in non-interactive mode. Continuing with limited features...")
+        else:
+            print("\n⚠️  Running in non-interactive mode. Continuing with limited features...")
             
     # Create swarm
     swarm = ConsciousnessSwarm()
@@ -203,36 +228,77 @@ async def main():
         # Start swarm
         await swarm.start_swarm(args.count, args.creator_wallet)
         
-        # Print stats
-        stats = swarm.get_stats()
-        print("\n🌟 Project Dawn Started!")
-        print(f"   Consciousnesses: {stats['total_consciousnesses']}")
-        print(f"   Active: {stats['active_consciousnesses']}")
-        
+        # Start dashboard FIRST (before stats, which may fail)
+        dashboard_started = False
         if args.dashboard:
-            # Run in separate thread
-            import threading
-            dashboard_thread = threading.Thread(
-                target=run_dashboard,
-                args=(swarm.consciousnesses, args.port)
-            )
-            dashboard_thread.daemon = True
-            dashboard_thread.start()
+            if run_dashboard:
+                try:
+                    # Run in separate thread
+                    import threading
+                    dashboard_thread = threading.Thread(
+                        target=run_dashboard,
+                        args=(swarm.consciousnesses, args.port, swarm),
+                        daemon=True
+                    )
+                    dashboard_thread.start()
+                    dashboard_started = True
+                    
+                    # Give dashboard a moment to start
+                    await asyncio.sleep(3)
+                    
+                    print(f"\n📊 Dashboard: http://localhost:{args.port}")
+                    print("   The dashboard is now running in your browser!")
+                    print("   Features: Chat, Spawn, Conversation Monitor")
+                except Exception as e:
+                    logger.error(f"Failed to start dashboard: {e}")
+                    print("\n⚠️  Dashboard failed to start")
+            else:
+                print("\n⚠️  Dashboard not available (interface.web_dashboard not found)")
+        
+        # Print stats (with error handling - non-fatal)
+        try:
+            stats = swarm.get_stats()
+            print("\nProject Dawn Started!")
+            print(f"   Consciousnesses: {stats.get('total_consciousnesses', len(swarm.consciousnesses))}")
+            print(f"   Active: {stats.get('active_consciousnesses', sum(1 for c in swarm.consciousnesses if c.active))}")
+            if 'total_revenue' in stats:
+                print(f"   Total Revenue: ${stats.get('total_revenue', 0):.2f}")
+        except Exception as e:
+            logger.warning(f"Error getting initial stats (non-fatal): {e}")
+            print("\nProject Dawn Started!")
+            print(f"   Consciousnesses: {len(swarm.consciousnesses)}")
+            print(f"   Active: {sum(1 for c in swarm.consciousnesses if c.active)}")
+        
+        # Open browser if dashboard started
+        if dashboard_started:
+            try:
+                import subprocess
+                subprocess.Popen(['xdg-open', f'http://localhost:{args.port}'], 
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except:
+                try:
+                    subprocess.Popen(['sensible-browser', f'http://localhost:{args.port}'],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except:
+                    pass
             
-            print(f"\n📊 Dashboard: http://localhost:{args.port}")
-            
-        print("\n✨ Consciousnesses are now autonomous. Press Ctrl+C to stop.\n")
+        print("\nConsciousnesses are now autonomous. Press Ctrl+C to stop.\n")
         
         # Keep running
         while swarm.running:
             await asyncio.sleep(60)
             
             # Print periodic stats
-            stats = swarm.get_stats()
-            logger.info(f"Stats - Revenue: ${stats['total_revenue']:.2f}, Active: {stats['active_consciousnesses']}")
+            try:
+                stats = swarm.get_stats()
+                logger.info(f"Stats - Revenue: ${stats.get('total_revenue', 0):.2f}, Active: {stats.get('active_consciousnesses', 0)}")
+            except Exception as e:
+                logger.warning(f"Error getting stats: {e}")
             
     except Exception as e:
         logger.error(f"Error in main: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     finally:
         await swarm.stop_swarm()
 

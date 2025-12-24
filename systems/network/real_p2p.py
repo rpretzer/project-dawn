@@ -9,19 +9,33 @@ import logging
 from typing import Dict, List, Optional, Set, Callable, Any
 from dataclasses import dataclass
 from datetime import datetime
-import multiaddr
-from libp2p import new_node
-from libp2p.network.stream.net_stream_interface import INetStream
-from libp2p.peer.id import ID
-from libp2p.peer.peerinfo import info_from_p2p_addr
-from libp2p.typing import TProtocol
-from libp2p.pubsub import pubsub
-from libp2p.pubsub import gossipsub
 import os
+
+# Optional P2P dependencies
+try:
+    import multiaddr
+    from libp2p import new_node
+    from libp2p.network.stream.net_stream_interface import INetStream
+    from libp2p.peer.id import ID
+    from libp2p.peer.peerinfo import info_from_p2p_addr
+    from libp2p.typing import TProtocol
+    from libp2p.pubsub import pubsub
+    from libp2p.pubsub import gossipsub
+    P2P_AVAILABLE = True
+except ImportError:
+    P2P_AVAILABLE = False
+    multiaddr = None
+    new_node = None
+    INetStream = None
+    ID = None
+    info_from_p2p_addr = None
+    TProtocol = None
+    pubsub = None
+    gossipsub = None
 
 logger = logging.getLogger(__name__)
 
-PROTOCOL_ID = TProtocol("/consciousness/1.0.0")
+PROTOCOL_ID = TProtocol("/consciousness/1.0.0") if P2P_AVAILABLE else None
 
 @dataclass
 class PeerInfo:
@@ -58,6 +72,11 @@ class P2PNetwork:
         
     async def start(self):
         """Start the P2P node"""
+        if not P2P_AVAILABLE:
+            logger.warning("libp2p not available. Install libp2p for P2P networking. Using fallback mode.")
+            await self._start_fallback()
+            return
+            
         try:
             # Create libp2p node
             self.node = await new_node(
@@ -95,8 +114,8 @@ class P2PNetwork:
             asyncio.create_task(self._discovery_loop())
             asyncio.create_task(self._heartbeat_loop())
             
-        except ImportError:
-            logger.warning("libp2p not installed, using fallback networking")
+        except Exception as e:
+            logger.warning(f"Failed to start libp2p node: {e}. Using fallback networking.")
             await self._start_fallback()
             
     async def _start_fallback(self):
@@ -211,7 +230,10 @@ class P2PNetwork:
         """Stop the P2P node"""
         self.running = False
         if self.node:
-            await self.node.close()
+            if hasattr(self.node, 'close'):
+                await self.node.close()
+            elif hasattr(self.node, 'stop'):
+                await self.node.stop()
             
     async def connect_to_peer(self, multiaddr_str: str) -> bool:
         """Connect to a peer by multiaddress"""

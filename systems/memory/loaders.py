@@ -15,7 +15,13 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pyarrow as pa
 from dataclasses import asdict
-import chromadb
+# Optional ChromaDB dependency
+try:
+    import chromadb
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    CHROMADB_AVAILABLE = False
+    chromadb = None
 import yaml
 import msgpack
 import h5py

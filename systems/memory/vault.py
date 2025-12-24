@@ -11,8 +11,16 @@ import asyncio
 import time
 import logging
 from abc import ABC, abstractmethod
-import chromadb
-from chromadb.config import Settings
+
+# Optional ChromaDB dependency
+try:
+    import chromadb
+    from chromadb.config import Settings
+    CHROMADB_AVAILABLE = True
+except (ImportError, Exception) as e:
+    CHROMADB_AVAILABLE = False
+    chromadb = None
+    Settings = None
 
 from .core import MemCube, MemoryQuery, MemoryType, MemoryState
 
@@ -47,6 +55,12 @@ class VectorStoreBackend(StorageBackend):
     """ChromaDB backend for semantic search"""
     
     def __init__(self, config: Dict[str, Any]):
+        if not CHROMADB_AVAILABLE:
+            raise ImportError(
+                "ChromaDB is not available. Install chromadb>=0.4.0 for vector storage support. "
+                "The system will use SQLite backend instead."
+            )
+        
         self.path = Path(config.get("path", "data/vector_store"))
         self.path.mkdir(parents=True, exist_ok=True)
         
@@ -373,7 +387,10 @@ class MemVault:
         
         # Initialize vector store if configured
         if "vector_store" in config:
-            backends["vector"] = VectorStoreBackend(config["vector_store"])
+            try:
+                backends["vector"] = VectorStoreBackend(config["vector_store"])
+            except ImportError as e:
+                logger.warning(f"Vector store backend not available: {e}. Using relational DB only.")
         
         return backends
     

@@ -6,14 +6,12 @@ from .evolutionary_system import (
     FitnessMetric,
     Genome,
     Individual,
-    EvolutionarySystem,
-    CapabilityExamples
+    EvolutionarySystem
 )
 
 __all__ = [
     'FitnessMetric',
     'Genome',
     'Individual',
-    'EvolutionarySystem',
-    'CapabilityExamples'
+    'EvolutionarySystem'
 ]

@@ -76,9 +76,16 @@ class EvolutionIntegration:
         
     def _apply_genome_to_consciousness(self, consciousness, genome: Genome):
         """Apply genetic traits to consciousness behavior"""
-        # Update personality traits
-        for trait, value in genome.traits.items():
-            consciousness.personality.traits[trait] = value
+        # Update personality traits - convert PersonalityTraits to dict if needed
+        traits_dict = genome.traits
+        if hasattr(genome.traits, '__dict__'):
+            traits_dict = {k: v for k, v in genome.traits.__dict__.items() if not k.startswith('_')}
+        elif not isinstance(genome.traits, dict):
+            traits_dict = {}
+        
+        for trait, value in traits_dict.items():
+            if hasattr(consciousness.personality.traits, trait):
+                setattr(consciousness.personality.traits, trait, value)
             
         # Apply cognitive parameters
         if hasattr(consciousness, 'llm'):
@@ -354,13 +361,30 @@ class EvolutionIntegration:
         """Get evolution statistics"""
         pop_stats = self.evolution.get_population_stats()
         
+        # Convert any non-serializable objects to strings/dicts
+        serializable_stats = {}
+        for k, v in pop_stats.items():
+            if isinstance(v, (str, int, float, bool, type(None))):
+                serializable_stats[k] = v
+            elif hasattr(v, '__dict__'):
+                # Convert objects to dict
+                try:
+                    serializable_stats[k] = {k2: str(v2) if not isinstance(v2, (str, int, float, bool, type(None))) else v2 
+                                            for k2, v2 in v.__dict__.items()}
+                except:
+                    serializable_stats[k] = str(v)
+            else:
+                serializable_stats[k] = str(v)
+        
         # Add swarm-specific stats
-        pop_stats.update({
+        serializable_stats.update({
             'active_consciousnesses': len(self.swarm.consciousnesses),
             'reproduction_queue': sum(1 for c in self.swarm.consciousnesses 
                                     if hasattr(c, 'ready_to_reproduce') and c.ready_to_reproduce),
             'cooldowns_active': len(self.reproduction_cooldowns)
         })
+        
+        return serializable_stats
         
         return pop_stats
 

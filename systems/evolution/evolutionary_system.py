@@ -317,7 +317,7 @@ class EvolutionarySystem:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 consciousness_id,
-                json.dumps(genome.traits),
+                json.dumps({k: v for k, v in genome.traits.__dict__.items() if not k.startswith('_')} if hasattr(genome.traits, '__dict__') else (genome.traits if isinstance(genome.traits, dict) else {})),
                 json.dumps(genome.cognitive_params),
                 json.dumps(genome.behavioral_tendencies),
                 genome.mutation_rate,
@@ -528,10 +528,13 @@ class EvolutionarySystem:
         distance = 0.0
         count = 0
         
-        # Compare traits
-        for trait in genome1.traits:
-            if trait in genome2.traits:
-                distance += abs(genome1.traits[trait] - genome2.traits[trait])
+        # Compare traits - handle both dict and PersonalityTraits object
+        traits1 = genome1.traits.__dict__ if hasattr(genome1.traits, '__dict__') else (genome1.traits if isinstance(genome1.traits, dict) else {})
+        traits2 = genome2.traits.__dict__ if hasattr(genome2.traits, '__dict__') else (genome2.traits if isinstance(genome2.traits, dict) else {})
+        
+        for trait in traits1:
+            if trait in traits2 and not trait.startswith('_'):
+                distance += abs(traits1[trait] - traits2[trait])
                 count += 1
                 
         # Compare cognitive parameters
@@ -586,13 +589,21 @@ class EvolutionarySystem:
         trait_stats = {}
         all_traits = set()
         for individual in self.population.values():
-            all_traits.update(individual.genome.traits.keys())
+            traits = individual.genome.traits.__dict__ if hasattr(individual.genome.traits, '__dict__') else (individual.genome.traits if isinstance(individual.genome.traits, dict) else {})
+            if isinstance(traits, dict):
+                all_traits.update(k for k in traits.keys() if not k.startswith('_'))
+            else:
+                # Extract attribute names from PersonalityTraits
+                all_traits.update(k for k in dir(individual.genome.traits) if not k.startswith('_') and not callable(getattr(individual.genome.traits, k, None)))
             
         for trait in all_traits:
-            values = [
-                ind.genome.traits.get(trait, 0.5) 
-                for ind in self.population.values()
-            ]
+            values = []
+            for ind in self.population.values():
+                traits = ind.genome.traits.__dict__ if hasattr(ind.genome.traits, '__dict__') else (ind.genome.traits if isinstance(ind.genome.traits, dict) else {})
+                if isinstance(traits, dict):
+                    values.append(traits.get(trait, 0.5))
+                else:
+                    values.append(getattr(ind.genome.traits, trait, 0.5))
             trait_stats[trait] = {
                 'mean': sum(values) / len(values),
                 'min': min(values),

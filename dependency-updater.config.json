@@ -1,0 +1,14 @@
+{
+  "projects": [
+    {
+      "path": ".",
+      "package_managers": ["pip"],
+      "auto_update": true,
+      "update_major": false,
+      "update_minor": true,
+      "update_patch": true,
+      "exclude_packages": []
+    }
+  ]
+}
+

@@ -13,7 +13,14 @@ from pathlib import Path
 import logging
 from web3 import Web3
 from eth_account import Account
-import ipfshttpclient
+
+# Optional IPFS dependency
+try:
+    import ipfshttpclient
+    IPFS_AVAILABLE = True
+except ImportError:
+    IPFS_AVAILABLE = False
+    ipfshttpclient = None
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +95,10 @@ class IPFSStorage:
         
     def _connect(self):
         """Connect to IPFS"""
+        if not IPFS_AVAILABLE:
+            logger.warning("IPFS client not available. Install ipfshttpclient for IPFS support.")
+            self.client = None
+            return
         try:
             self.client = ipfshttpclient.connect(self.api_url)
             logger.info("Connected to IPFS")

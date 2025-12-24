@@ -11,9 +11,30 @@ import json
 from typing import Dict, Any, List, Optional, Callable
 from datetime import datetime, timedelta
 import random
-import tweepy
-from discord import Client, Intents, Message
-from linkedin_api import Linkedin
+
+# Optional social media dependencies
+try:
+    import tweepy
+    TWITTER_AVAILABLE = True
+except ImportError:
+    TWITTER_AVAILABLE = False
+    tweepy = None
+
+try:
+    from discord import Client, Intents, Message
+    DISCORD_AVAILABLE = True
+except ImportError:
+    DISCORD_AVAILABLE = False
+    Client = None
+    Intents = None
+    Message = None
+
+try:
+    from linkedin_api import Linkedin
+    LINKEDIN_AVAILABLE = True
+except ImportError:
+    LINKEDIN_AVAILABLE = False
+    Linkedin = None
 
 from core.plugin_system import PluginInterface
 

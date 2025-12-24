@@ -1530,6 +1530,9 @@ asyncio.run(test())
 - Connection errors: Check if service is running on correct port
 """
 
+# Alias for backward compatibility
+LLMIntegration = ConsciousnessLLM
+
 def print_setup_instructions():
     """Print local LLM setup instructions"""
     print(LOCAL_LLM_SETUP)
