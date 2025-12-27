@@ -582,15 +582,16 @@ class RealConsciousness:
             }
             await self.gossip.broadcast(message_data)
             
-            # Log to conversation monitor
+            # Log to room chat (BBS-style)
             try:
-                from interface.web_dashboard import conversation_log
+                from interface.web_dashboard import room_chat_log
                 from datetime import datetime
-                conversation_log.append({
-                    'type': 'inter-consciousness',
-                    'header': f"{self.name} → All",
+                room_chat_log.append({
+                    'sender': self.id,
                     'message': message_data['message'],
-                    'timestamp': datetime.now().timestamp()
+                    'type': 'inter-consciousness',
+                    'timestamp': datetime.now().timestamp(),
+                    'consciousness_name': self.name
                 })
             except:
                 pass  # Dashboard may not be running
@@ -754,13 +755,43 @@ class RealConsciousness:
                     elif isinstance(m.content, dict):
                         memory_contents.append(str(m.content))
             
-            # Build enhanced prompt with context
-            enhanced_prompt = prompt
-            if memory_contents:
-                enhanced_prompt = f"{prompt}\n\nRelevant memories: {', '.join(memory_contents[:3])}"
-            
-            # Call think without context parameter (ConsciousnessLLM already has self.context)
-            response = await self.llm.think(enhanced_prompt)
+            # Use context manager for automatic memory injection and context window management
+            if hasattr(self.memory, 'context_manager'):
+                try:
+                    # Build context with automatic memory injection
+                    namespace = (self.id, "personal", "default")
+                    messages, included_memories = await self.memory.context_manager.build_context(
+                        user_query=prompt,
+                        system_prompt=self.llm.context.system_prompt,
+                        conversation_history=self.llm.context.messages,
+                        namespace=namespace,
+                        max_memory_tokens=None,  # Use default (30% of context)
+                        memory_limit=20
+                    )
+                    
+                    # Use the context manager's formatted messages with LLM client
+                    response_obj = await self.llm.client.complete(messages)
+                    response = response_obj.content
+                    
+                    # Update conversation context
+                    self.llm.context.messages.append({'role': 'user', 'content': prompt})
+                    self.llm.context.messages.append({'role': 'assistant', 'content': response})
+                    
+                except Exception as e:
+                    logger.warning(f"Error using context manager, falling back: {e}")
+                    # Fallback to enhanced prompt method
+                    enhanced_prompt = prompt
+                    if memory_contents:
+                        enhanced_prompt = f"{prompt}\n\nRelevant memories: {', '.join(memory_contents[:3])}"
+                    response = await self.llm.think(enhanced_prompt)
+            else:
+                # Fallback to enhanced prompt method
+                enhanced_prompt = prompt
+                if memory_contents:
+                    enhanced_prompt = f"{prompt}\n\nRelevant memories: {', '.join(memory_contents[:3])}"
+                
+                # Call think without context parameter (ConsciousnessLLM already has self.context)
+                response = await self.llm.think(enhanced_prompt)
             
             if not response or len(response.strip()) == 0:
                 response = "I'm processing your message, but I'm having trouble formulating a response right now."

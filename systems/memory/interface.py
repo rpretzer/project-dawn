@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, Callable, Any
 import asyncio
 import time
 import re
+import uuid
 from abc import ABC, abstractmethod
 import logging
 
@@ -224,6 +225,35 @@ class MemoryAPI:
         )
         
         return await self.retrieve(memory_query)
+    
+    async def search_ranked(
+        self,
+        query: str,
+        namespace: Tuple[str, str, str],
+        limit: int = 10
+    ) -> List['RankedMemory']:
+        """
+        Search with ranking and scoring
+        
+        Returns ranked memories with relevance scores and explanations
+        """
+        from .ranking import MemoryRanker
+        
+        # Get base results
+        memories = await self.search(query, namespace, limit=limit * 2)  # Get more for ranking
+        
+        # Rank them
+        ranker = MemoryRanker()
+        memory_query = MemoryQuery(
+            query_type="hybrid",
+            parameters={"text": query, "limit": limit},
+            namespace=namespace,
+            requester_id=namespace[0]
+        )
+        
+        ranked = await ranker.rank_memories(memories, memory_query)
+        
+        return ranked[:limit]  # Return top N
     
     def _validate_memory(self, memory: MemCube):
         """Validate memory before storage"""

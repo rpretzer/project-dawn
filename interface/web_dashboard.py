@@ -6,7 +6,6 @@ Retro BBS-style IRC chat room interface
 import asyncio
 import json
 import logging
-import threading
 import hashlib
 import secrets
 import time
@@ -980,40 +979,51 @@ BBS_DASHBOARD_HTML = """
             
             // Update who list with both humans and consciousnesses
             const whoContent = document.getElementById('who-content');
-            let whoList = [];
+            let consciousnessList = [];
             
-            // Add online humans
+            // Add consciousnesses first (from data we already have) - display immediately
+            if (data.consciousnesses && data.consciousnesses.length > 0) {
+                data.consciousnesses.forEach(cons => {
+                    consciousnessList.push(`<div class="who-item ${cons.active ? 'active' : ''}">${cons.name || cons.id}</div>`);
+                });
+            }
+            
+            // Display consciousnesses immediately (clear "Loading..." right away)
+            if (consciousnessList.length === 0 && (!data.consciousnesses || data.consciousnesses.length === 0)) {
+                whoContent.innerHTML = '<div class="who-item">No one here</div>';
+            } else if (consciousnessList.length > 0) {
+                whoContent.innerHTML = consciousnessList.join('');
+            }
+            
+            // Add online humans asynchronously and update display
             fetch('/api/users/online')
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    return response.json();
+                })
                 .then(userData => {
-                    if (userData.success) {
+                    // Build complete list with both consciousnesses and users
+                    let completeList = [...consciousnessList];
+                    
+                    if (userData.success && userData.users) {
                         userData.users.forEach(user => {
-                            whoList.push(`<div class="who-item active">${user.nickname}${user.away ? ' (away)' : ''}</div>`);
+                            completeList.push(`<div class="who-item active">${user.nickname}${user.away ? ' (away)' : ''}</div>`);
                         });
                     }
                     
-                    // Add consciousnesses
-                    if (data.consciousnesses && data.consciousnesses.length > 0) {
-                        data.consciousnesses.forEach(cons => {
-                            whoList.push(`<div class="who-item ${cons.active ? 'active' : ''}">${cons.name || cons.id}</div>`);
-                        });
-                    }
-                    
-                    if (whoList.length === 0) {
+                    // Update the display with complete list
+                    if (completeList.length === 0) {
                         whoContent.innerHTML = '<div class="who-item">No one here</div>';
                     } else {
-                        whoContent.innerHTML = whoList.join('');
+                        whoContent.innerHTML = completeList.join('');
                     }
                 })
-                .catch(() => {
-                    // Fallback if user list fails
-                    if (data.consciousnesses && data.consciousnesses.length > 0) {
-                        whoContent.innerHTML = data.consciousnesses.map(cons => 
-                            `<div class="who-item ${cons.active ? 'active' : ''}">${cons.name || cons.id}</div>`
-                        ).join('');
-                    } else {
-                        whoContent.innerHTML = '<div class="who-item">No one here</div>';
-                    }
+                .catch(error => {
+                    console.error('Error fetching online users:', error);
+                    // Fallback - show what we have (consciousnesses) - already displayed, so this is fine
+                    // The consciousnesses are already shown above, so we don't need to do anything here
                 });
             
             // Update stats panel if visible
@@ -1367,12 +1377,22 @@ COMMANDS:
         
         function fetchData() {
             fetch('/api/stats')
-                .then(response => response.json())
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    return response.json();
+                })
                 .then(data => {
                     updateStatus(data);
                 })
                 .catch(error => {
                     console.error('Error fetching data:', error);
+                    // Still update who-content to clear "Loading..." even on error
+                    const whoContent = document.getElementById('who-content');
+                    if (whoContent && whoContent.textContent === 'Loading...') {
+                        whoContent.innerHTML = '<div class="who-item">No one here</div>';
+                    }
                 });
         }
         
@@ -1470,17 +1490,21 @@ def _run_flask_dashboard(consciousnesses: List, port: int = 8000, swarm=None):
     
     @app.route('/')
     def index():
-        # Initialize user session
+        # Track active user if authenticated
         user_id = get_user_id()
-        nickname = get_nickname(user_id)
-        
-        # Track active user
-        active_users[user_id] = {
-            'nickname': nickname,
-            'connected_at': session.get('connected_at', time.time()),
-            'last_activity': time.time(),
-            'ip': request.remote_addr
-        }
+        if user_id:
+            nickname = get_nickname(user_id)
+            username = get_username()
+            if user_id not in active_users:
+                active_users[user_id] = {
+                    'nickname': nickname,
+                    'username': username,
+                    'connected_at': session.get('connected_at', time.time()),
+                    'last_activity': time.time(),
+                    'ip': request.remote_addr
+                }
+            else:
+                active_users[user_id]['last_activity'] = time.time()
         
         return render_template_string(BBS_DASHBOARD_HTML)
     
@@ -2008,9 +2032,24 @@ def _run_flask_dashboard(consciousnesses: List, port: int = 8000, swarm=None):
     
     # Monitor inter-consciousness communications and add to room
     def monitor_inter_consciousness():
-        """Monitor and log inter-consciousness communications"""
-        # This will be called periodically to check for inter-consciousness messages
-        # For now, we'll rely on the gossip protocol integration
+        """Monitor and log inter-consciousness communications
+        
+        This function would periodically check for inter-consciousness messages
+        from the gossip protocol or P2P network and add them to the room chat log.
+        Currently, inter-consciousness communication is handled through the gossip
+        protocol integration at the network layer, so explicit monitoring may not
+        be necessary. This can be extended in the future if needed.
+        """
+        # Inter-consciousness messages are handled through:
+        # 1. Gossip protocol (systems/network/gossip_protocol.py)
+        # 2. P2P network (systems/network/real_p2p.py)
+        # 3. Direct consciousness communication channels
+        # 
+        # If needed in the future, this function could:
+        # - Query gossip protocol for recent inter-consciousness messages
+        # - Check P2P network message logs
+        # - Add formatted inter-consciousness messages to room_chat_log
+        # - Update the dashboard in real-time via WebSocket (if implemented)
         pass
     
     logger.info(f"Starting BBS-style Flask dashboard on http://localhost:{port}")

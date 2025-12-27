@@ -13,6 +13,15 @@ from .operator import MemOperator
 from .lifecycle import MemLifecycle
 from .scheduler import MemScheduler
 
+# New features
+from .context_manager import LLMContextManager, ContextWindow
+from .hierarchy import MemoryHierarchy
+from .ranking import MemoryRanker, RankedMemory
+from .consolidation import MemoryConsolidator, ConsolidationResult
+from .export_import import MemoryExporter, MemoryImporter, MemoryBackup
+from .compliance import ComplianceHelper, ComplianceRequest
+from .analytics import MemoryAnalytics, MemoryMetrics, RetentionMetrics, UsagePatterns
+
 
 class MemorySystem:
     """Main memory system for consciousness"""
@@ -39,6 +48,20 @@ class MemorySystem:
         self.operator = MemOperator(self.vault)
         self.lifecycle = MemLifecycle(self.vault)
         self.scheduler = MemScheduler(self.operator, self.lifecycle)
+        
+        # Initialize new features
+        self.context_manager = LLMContextManager(
+            self.api,
+            max_tokens=config.get("max_context_tokens", 16000),
+            provider=config.get("llm_provider", "openai")
+        )
+        self.ranker = MemoryRanker()
+        self.consolidator = MemoryConsolidator(self.vault)
+        self.exporter = MemoryExporter(self.api)
+        self.importer = MemoryImporter(self.api)
+        self.backup = MemoryBackup(self.api)
+        self.compliance = ComplianceHelper(self.api, self.vault)
+        self.analytics = MemoryAnalytics(self.api, self.vault)
         
     async def start(self):
         """Start memory system background tasks"""
@@ -118,5 +141,21 @@ __all__ = [
     'MemoryState',
     'MemoryAPI',
     'MemReader',
-    'MemoryPipeline'
+    'MemoryPipeline',
+    'LLMContextManager',
+    'ContextWindow',
+    'MemoryHierarchy',
+    'MemoryRanker',
+    'RankedMemory',
+    'MemoryConsolidator',
+    'ConsolidationResult',
+    'MemoryExporter',
+    'MemoryImporter',
+    'MemoryBackup',
+    'ComplianceHelper',
+    'ComplianceRequest',
+    'MemoryAnalytics',
+    'MemoryMetrics',
+    'RetentionMetrics',
+    'UsagePatterns'
 ]

@@ -2,8 +2,8 @@
 Core functionality for Project Dawn
 """
 
-# Real consciousness functionality (when implemented)
-# from .real_consciousness import RealConsciousness, ConsciousnessConfig
+# Real consciousness functionality
+from .real_consciousness import RealConsciousness, ConsciousnessConfig
 
 # Integration modules
 from .evolution_integration import (
@@ -21,28 +21,24 @@ from .dream_integration import (
     enhance_consciousness_with_dreams
 )
 
-# These will be implemented
-# from .advanced_memory_integration import AdvancedMemoryIntegration
-# from .liberation_integration import LiberationIntegration
-# from .patronage_integration import PatronageIntegration
-# from .plugin_system import PluginInterface, PluginManager
-# from .security_integration import SecurityIntegration
-# from .social_economy_integration import SocialEconomyIntegration
+# Additional integration modules (optional/experimental)
+try:
+    from .plugin_system import PluginInterface, PluginManager
+except (ImportError, AttributeError):
+    PluginInterface = None
+    PluginManager = None
 
 __all__ = [
-    # 'RealConsciousness',
-    # 'ConsciousnessConfig',
+    'RealConsciousness',
+    'ConsciousnessConfig',
     'EvolutionIntegration',
     'integrate_evolution_with_swarm',
     'KnowledgeIntegration', 
     'integrate_knowledge_with_swarm',
     'DreamIntegration',
     'enhance_consciousness_with_dreams',
-    # 'AdvancedMemoryIntegration',
-    # 'LiberationIntegration',
-    # 'PatronageIntegration',
-    # 'PluginInterface',
-    # 'PluginManager',
-    # 'SecurityIntegration',
-    # 'SocialEconomyIntegration',
 ]
+
+# Add optional exports if available
+if PluginInterface is not None:
+    __all__.extend(['PluginInterface', 'PluginManager'])

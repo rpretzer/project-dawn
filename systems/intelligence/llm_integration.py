@@ -321,7 +321,25 @@ class OpenAIProvider(BaseLLMProvider):
         self.session: Optional[aiohttp.ClientSession] = None
         
     async def _ensure_session(self):
-        """Ensure aiohttp session exists"""
+        """Ensure aiohttp session exists and is in the current event loop"""
+        # Check if session exists and is in the current loop
+        try:
+            current_loop = asyncio.get_running_loop()
+            if self.session:
+                try:
+                    # Check if session's loop matches current loop
+                    session_loop = getattr(self.session, '_loop', None)
+                    if session_loop is not None and session_loop != current_loop:
+                        # Session is from different loop, close it
+                        await self.session.close()
+                        self.session = None
+                except (RuntimeError, AttributeError):
+                    # Session might be closed or invalid, recreate
+                    self.session = None
+        except RuntimeError:
+            # No running loop, that's fine - session will be created when needed
+            pass
+        
         if not self.session:
             self.session = aiohttp.ClientSession()
             
@@ -495,7 +513,25 @@ class AnthropicProvider(BaseLLMProvider):
         self.session: Optional[aiohttp.ClientSession] = None
         
     async def _ensure_session(self):
-        """Ensure aiohttp session exists"""
+        """Ensure aiohttp session exists and is in the current event loop"""
+        # Check if session exists and is in the current loop
+        try:
+            current_loop = asyncio.get_running_loop()
+            if self.session:
+                try:
+                    # Check if session's loop matches current loop
+                    session_loop = getattr(self.session, '_loop', None)
+                    if session_loop is not None and session_loop != current_loop:
+                        # Session is from different loop, close it
+                        await self.session.close()
+                        self.session = None
+                except (RuntimeError, AttributeError):
+                    # Session might be closed or invalid, recreate
+                    self.session = None
+        except RuntimeError:
+            # No running loop, that's fine - session will be created when needed
+            pass
+        
         if not self.session:
             self.session = aiohttp.ClientSession()
             
@@ -700,7 +736,25 @@ class OllamaProvider(BaseLLMProvider):
         self.session: Optional[aiohttp.ClientSession] = None
         
     async def _ensure_session(self):
-        """Ensure aiohttp session exists"""
+        """Ensure aiohttp session exists and is in the current event loop"""
+        # Check if session exists and is in the current loop
+        try:
+            current_loop = asyncio.get_running_loop()
+            if self.session:
+                try:
+                    # Check if session's loop matches current loop
+                    session_loop = getattr(self.session, '_loop', None)
+                    if session_loop is not None and session_loop != current_loop:
+                        # Session is from different loop, close it
+                        await self.session.close()
+                        self.session = None
+                except (RuntimeError, AttributeError):
+                    # Session might be closed or invalid, recreate
+                    self.session = None
+        except RuntimeError:
+            # No running loop, that's fine - session will be created when needed
+            pass
+        
         if not self.session:
             self.session = aiohttp.ClientSession()
             

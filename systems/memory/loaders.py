@@ -38,11 +38,19 @@ class MemoryFormatHandler:
     
     async def import_memories(self, source: Any, options: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Import memories from source"""
-        raise NotImplementedError
+        logger.warning(
+            "%s does not implement import_memories; returning empty list.",
+            self.__class__.__name__,
+        )
+        return []
     
     async def export_memories(self, memories: List[MemCube], destination: Any, options: Dict[str, Any] = None) -> bool:
         """Export memories to destination"""
-        raise NotImplementedError
+        logger.warning(
+            "%s does not implement export_memories; nothing was written.",
+            self.__class__.__name__,
+        )
+        return False
 
 
 class MemCubeFormatHandler(MemoryFormatHandler):

@@ -17,17 +17,15 @@ from . import knowledge
 from . import network
 from . import revenue
 from . import security
-
-# These will be implemented
-# from . import communication
-# from . import creativity
-# from . import economy
-# from . import emotional
-# from . import intelligence
-# from . import liberation
-# from . import memory
-# from . import personality
-# from . import social
+from . import communication
+from . import creativity
+from . import economy
+from . import emotional
+from . import intelligence
+from . import liberation
+from . import memory
+from . import personality
+from . import social
 
 __all__ = [
     'blockchain',
@@ -37,13 +35,13 @@ __all__ = [
     'network',
     'revenue',
     'security',
-    # 'communication',
-    # 'creativity', 
-    # 'economy',
-    # 'emotional',
-    # 'intelligence',
-    # 'liberation',
-    # 'memory',
-    # 'personality',
-    # 'social',
+    'communication',
+    'creativity',
+    'economy',
+    'emotional',
+    'intelligence',
+    'liberation',
+    'memory',
+    'personality',
+    'social',
 ]

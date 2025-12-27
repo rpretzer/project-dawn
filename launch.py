@@ -83,9 +83,13 @@ class ConsciousnessSwarm:
         
         logger.info(f"Started swarm with {count} consciousnesses")
         
-        # Bootstrap P2P connections
-        if len(self.consciousnesses) > 1:
-            await self._bootstrap_p2p()
+        # Bootstrap P2P connections (only if P2P is enabled)
+        if len(self.consciousnesses) > 1 and os.getenv('ENABLE_P2P', 'true').lower() == 'true':
+            try:
+                await self._bootstrap_p2p()
+            except Exception as e:
+                logger.warning(f"P2P bootstrap failed (non-fatal): {e}")
+                # Continue without P2P
             
         # Initialize evolution system
         self.evolution = integrate_evolution_with_swarm(self)
@@ -160,11 +164,16 @@ def validate_environment():
     warnings = []
     
     # Check LLM configuration
-    provider = os.getenv('LLM_PROVIDER', 'openai')
+    provider = os.getenv('LLM_PROVIDER', 'openai').lower()
     if provider == 'openai' and not os.getenv('OPENAI_API_KEY'):
         warnings.append("OPENAI_API_KEY not set - LLM features will be limited")
     elif provider == 'anthropic' and not os.getenv('ANTHROPIC_API_KEY'):
         warnings.append("ANTHROPIC_API_KEY not set - LLM features will be limited")
+    elif provider in ('ollama', 'local'):
+        # Ollama/local LLM - no API key needed, just check if URL is accessible
+        ollama_url = os.getenv('OLLAMA_URL') or os.getenv('LOCAL_LLM_URL', 'http://localhost:11434')
+        # Don't add warning - Ollama works without API keys
+        pass
         
     # Check blockchain configuration
     if os.getenv('ENABLE_BLOCKCHAIN', 'true').lower() == 'true':
