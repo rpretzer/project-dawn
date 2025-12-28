@@ -33,9 +33,18 @@ class OpsEvent:
 
 
 class OpsLogStore:
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(
+        self,
+        db_path: Optional[Path] = None,
+        *,
+        retention_days: Optional[int] = None,
+        max_events: Optional[int] = None,
+    ):
         self.db_path = db_path or Path("data/ops.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.retention_days = int(retention_days) if retention_days is not None else None
+        self.max_events = int(max_events) if max_events is not None else None
+        self._append_count = 0
         self._init_db()
 
     def _init_db(self) -> None:
@@ -52,6 +61,29 @@ class OpsLogStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ops_events_time ON ops_events(created_at_ts DESC)")
+            conn.commit()
+
+    def _prune_if_needed(self) -> None:
+        # Prune occasionally to avoid write amplification.
+        self._append_count += 1
+        if self._append_count % 25 != 0:
+            return
+
+        with sqlite3.connect(self.db_path) as conn:
+            if self.retention_days and self.retention_days > 0:
+                cutoff = time.time() - float(self.retention_days) * 86400.0
+                conn.execute("DELETE FROM ops_events WHERE created_at_ts < ?", (float(cutoff),))
+            if self.max_events and self.max_events > 0:
+                # Keep newest max_events by id.
+                conn.execute(
+                    """
+                    DELETE FROM ops_events
+                    WHERE id NOT IN (
+                        SELECT id FROM ops_events ORDER BY id DESC LIMIT ?
+                    )
+                    """,
+                    (int(self.max_events),),
+                )
             conn.commit()
 
     def append(self, event_type: str, payload: Dict[str, Any]) -> OpsEvent:
@@ -71,23 +103,37 @@ class OpsLogStore:
             payload_obj = json.loads(raw)
         except Exception:
             payload_obj = {"raw": raw}
+        self._prune_if_needed()
         return OpsEvent(id=event_id, event_type=str(event_type), payload=payload_obj, created_at_ts=now)
 
-    def list_recent(self, *, limit: int = 200) -> List[OpsEvent]:
+    def list_recent(
+        self,
+        *,
+        limit: int = 200,
+        event_type: Optional[str] = None,
+        room: Optional[str] = None,
+    ) -> List[OpsEvent]:
         limit = max(1, min(int(limit), 1000))
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            rows = list(
-                conn.execute(
-                    """
-                    SELECT id, event_type, payload_json, created_at_ts
-                    FROM ops_events
-                    ORDER BY created_at_ts DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
-            )
+            where = []
+            args: List[Any] = []
+            if event_type:
+                where.append("event_type = ?")
+                args.append(str(event_type))
+            if room:
+                # Best-effort filter: payload is JSON text; this is a cheap contains filter.
+                where.append("payload_json LIKE ?")
+                args.append(f'%\"room\": \"{str(room)}\"%')
+            sql = """
+                SELECT id, event_type, payload_json, created_at_ts
+                FROM ops_events
+            """
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY created_at_ts DESC, id DESC LIMIT ?"
+            args.append(limit)
+            rows = list(conn.execute(sql, tuple(args)).fetchall())
         out: List[OpsEvent] = []
         for r in rows:
             try:

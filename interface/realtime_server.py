@@ -406,7 +406,23 @@ class RealtimeChatServer:
 
         # Structured ops log (optional)
         self.ops_log_enabled = os.getenv("DAWN_OPS_LOG_ENABLED", "true" if ENV == "prod" else "false").lower() == "true"
-        self.ops_log = OpsLogStore(Path(os.getenv("DAWN_OPS_DB", "data/ops.db"))) if self.ops_log_enabled else None
+        try:
+            retention_days = int(os.getenv("DAWN_OPS_RETENTION_DAYS", "14"))
+        except Exception:
+            retention_days = 14
+        try:
+            max_events = int(os.getenv("DAWN_OPS_MAX_EVENTS", "5000"))
+        except Exception:
+            max_events = 5000
+        self.ops_log = (
+            OpsLogStore(
+                Path(os.getenv("DAWN_OPS_DB", "data/ops.db")),
+                retention_days=retention_days,
+                max_events=max_events,
+            )
+            if self.ops_log_enabled
+            else None
+        )
         self._recent_errors: deque = deque(maxlen=50)
 
         # Optional: automatic evolution loop (safe: uses experiments + rollback).
@@ -1110,6 +1126,25 @@ class RealtimeChatServer:
             room_s = _sanitize_room(room) if room else None
             events = self.moderation.list_events(limit=limit, room=room_s)
             await self._send(ws, {"type": "audit_events", "events": events, "ts": time.time()})
+            return
+
+        if msg_type == "get_ops":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            if not self.ops_log:
+                await self._send(ws, {"type": "ops_events", "enabled": False, "events": [], "ts": time.time()})
+                return
+            try:
+                limit = int(payload.get("limit") or 200)
+            except Exception:
+                limit = 200
+            et = payload.get("event_type")
+            event_type = str(et).strip() if et else None
+            rm = payload.get("room")
+            room_s = _sanitize_room(rm) if rm else None
+            evs = [e.to_dict() for e in self.ops_log.list_recent(limit=limit, event_type=event_type or None, room=room_s)]
+            await self._send(ws, {"type": "ops_events", "enabled": True, "events": evs, "ts": time.time()})
             return
 
         if msg_type == "check_patch":
@@ -2082,6 +2117,15 @@ _INDEX_HTML = r"""<!doctype html>
         </div>
         <div id="audit-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
         <div class="sep"></div>
+        <div><strong>Ops (admin)</strong></div>
+        <div class="hint" style="margin-top:6px;">Event type (optional):</div>
+        <input id="ops-type" placeholder="e.g. create_task" style="width:100%; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="ops-refresh" class="miniBtn">refresh</button>
+          <button id="ops-room" class="miniBtn">this room</button>
+        </div>
+        <div id="ops-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
+        <div class="sep"></div>
         <div><strong>New Task</strong></div>
         <div class="hint">Assign to:</div>
         <select id="task-target">
@@ -2155,6 +2199,10 @@ _INDEX_HTML = r"""<!doctype html>
     const auditRefreshBtn = document.getElementById('audit-refresh');
     const auditRoomBtn = document.getElementById('audit-room');
     const auditOutEl = document.getElementById('audit-out');
+    const opsTypeEl = document.getElementById('ops-type');
+    const opsRefreshBtn = document.getElementById('ops-refresh');
+    const opsRoomBtn = document.getElementById('ops-room');
+    const opsOutEl = document.getElementById('ops-out');
     const patchCheckBtn = document.getElementById('patch-check');
     const patchApplyBtn = document.getElementById('patch-apply');
     const patchOutEl = document.getElementById('patch-out');
@@ -2390,6 +2438,8 @@ _INDEX_HTML = r"""<!doctype html>
       patchOutEl.textContent = ' ';
       selectedFilePath = null;
       repoOutEl.textContent = ' ';
+      auditOutEl.textContent = ' ';
+      opsOutEl.textContent = ' ';
       selectedTaskDetail = null;
 
       ws.onmessage = (evt) => {
@@ -2411,6 +2461,8 @@ _INDEX_HTML = r"""<!doctype html>
           patchOutEl.textContent = ' ';
           selectedFilePath = null;
           repoOutEl.textContent = ' ';
+          auditOutEl.textContent = ' ';
+          opsOutEl.textContent = ' ';
           selectedTaskDetail = null;
           return;
         }
@@ -2498,6 +2550,20 @@ _INDEX_HTML = r"""<!doctype html>
           auditOutEl.textContent = lines.join('\\n') || '—';
           return;
         }
+        if (msg.type === 'ops_events') {
+          if (!msg.enabled) {
+            opsOutEl.textContent = 'Ops log is disabled (DAWN_OPS_LOG_ENABLED=false).';
+            return;
+          }
+          const evs = msg.events || [];
+          const lines = [];
+          for (const e of evs.slice(0, 200)) {
+            const room = e.payload?.room ? ` room=${e.payload.room}` : '';
+            lines.push(`#${e.id} ${e.event_type}${room} ${JSON.stringify(e.payload || {})}`);
+          }
+          opsOutEl.textContent = lines.join('\\n') || '—';
+          return;
+        }
         if (msg.type === 'rated') {
           if (selectedTaskId) {
             try { ws?.send(JSON.stringify({type:'get_task', task_id: selectedTaskId})); } catch {}
@@ -2559,6 +2625,17 @@ _INDEX_HTML = r"""<!doctype html>
     auditRoomBtn.onclick = () => {
       auditOutEl.textContent = 'Loading room audit…';
       try { ws?.send(JSON.stringify({type:'get_audit', limit: 100, room})); } catch {}
+    };
+
+    opsRefreshBtn.onclick = () => {
+      opsOutEl.textContent = 'Loading ops…';
+      const et = (opsTypeEl.value || '').trim();
+      try { ws?.send(JSON.stringify({type:'get_ops', limit: 200, event_type: et || undefined})); } catch {}
+    };
+    opsRoomBtn.onclick = () => {
+      opsOutEl.textContent = 'Loading room ops…';
+      const et = (opsTypeEl.value || '').trim();
+      try { ws?.send(JSON.stringify({type:'get_ops', limit: 200, room, event_type: et || undefined})); } catch {}
     };
 
     patchCheckBtn.onclick = () => {
