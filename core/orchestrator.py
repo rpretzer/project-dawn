@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from core.task_manager import Task, TaskStore
 from core.agent_policy import PolicyStore, AgentPolicy
-from core.http_tools import http_get as _http_get
+from core.http_tools import http_get as _http_get, http_get_json as _http_get_json
 from core.git_tools import git_status as _git_status, git_diff as _git_diff
 
 logger = logging.getLogger(__name__)
@@ -265,6 +265,14 @@ class AgentOrchestrator:
             res = _http_get(url, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
             return res.to_dict()
 
+        async def tool_http_get_json(args: Dict[str, Any]) -> Dict[str, Any]:
+            url = str(args.get("url") or "").strip()
+            max_bytes = int(args.get("max_bytes", 300_000))
+            timeout_seconds = float(args.get("timeout_seconds", 10.0))
+            max_json_chars = int(args.get("max_json_chars", 200_000))
+            res = _http_get_json(url, max_bytes=max_bytes, timeout_seconds=timeout_seconds, max_json_chars=max_json_chars)
+            return res.to_dict()
+
         async def tool_git_status(args: Dict[str, Any]) -> Dict[str, Any]:
             porcelain = bool(args.get("porcelain", True))
             res = _git_status(self.workspace_root, porcelain=porcelain)
@@ -387,6 +395,23 @@ class AgentOrchestrator:
                 },
             ),
             tool_http_get,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="http_get_json",
+                description="Fetch a URL (safe allowlist) and parse JSON.",
+                json_schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "max_bytes": {"type": "integer", "minimum": 1000, "maximum": 1000000},
+                        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 30},
+                        "max_json_chars": {"type": "integer", "minimum": 1000, "maximum": 1000000},
+                    },
+                    "required": ["url"],
+                },
+            ),
+            tool_http_get_json,
         )
         self.tools.register(
             ToolSpec(
@@ -568,7 +593,7 @@ class AgentOrchestrator:
             "- If you need to create/update files as deliverables, use fs_write and write under artifacts/<task_id>/...\n"
             "- If you need to modify existing files, prefer fs_patch (exact replacement) over rewriting whole files.\n"
             "- If you need to inspect repo state, use fs_list/fs_read.\n"
-            "- If you need to reference external docs, use http_get (host allowlist applies).\n"
+            "- If you need to reference external docs, use http_get/http_get_json (host allowlist applies).\n"
             "- If you need to summarize changes you made, use git_status and git_diff (read-only).\n"
         )
         prompt = (

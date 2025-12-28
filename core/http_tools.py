@@ -12,10 +12,11 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
+import json
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 DEFAULT_ALLOWED_HOSTS = ("raw.githubusercontent.com", "api.github.com")
@@ -113,6 +114,46 @@ class HttpGetResult:
         }
 
 
+@dataclass(frozen=True)
+class HttpGetJsonResult:
+    ok: bool
+    url: str
+    final_url: Optional[str]
+    status: Optional[int]
+    json: Optional[Any]
+    truncated: bool = False
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "ok": self.ok,
+            "url": self.url,
+            "final_url": self.final_url,
+            "status": self.status,
+            "json": self.json,
+            "truncated": self.truncated,
+            "error": self.error,
+        }
+
+
+def _parse_json_text(text: str, *, max_chars: int = 200_000) -> Tuple[Optional[Any], bool, Optional[str]]:
+    """
+    Parse JSON from text with a size bound.
+    Returns (value, truncated, error).
+    """
+    if text is None:
+        return None, False, "empty"
+    if len(text) > max_chars:
+        text = text[:max_chars]
+        truncated = True
+    else:
+        truncated = False
+    try:
+        return json.loads(text), truncated, None
+    except Exception as e:
+        return None, truncated, f"json_parse_failed:{e}"
+
+
 def http_get(
     url: str,
     *,
@@ -141,4 +182,55 @@ def http_get(
             return HttpGetResult(ok=True, url=url, final_url=str(final_url) if final_url else None, status=int(status) if status is not None else None, content=text, truncated=truncated)
     except Exception as e:
         return HttpGetResult(ok=False, url=url, final_url=None, status=None, content=None, truncated=False, error=str(e))
+
+
+def http_get_json(
+    url: str,
+    *,
+    max_bytes: int = 300_000,
+    timeout_seconds: float = 10.0,
+    max_json_chars: int = 200_000,
+    user_agent: str = "ProjectDawn/1.0 (+https://local)",
+) -> HttpGetJsonResult:
+    ok, reason = is_allowed_url(url)
+    if not ok:
+        return HttpGetJsonResult(ok=False, url=url, final_url=None, status=None, json=None, truncated=False, error=reason)
+
+    max_bytes = max(1000, min(int(max_bytes), 1_000_000))
+    timeout_seconds = max(1.0, min(float(timeout_seconds), 30.0))
+    max_json_chars = max(1000, min(int(max_json_chars), 1_000_000))
+
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            status = getattr(resp, "status", None)
+            final_url = getattr(resp, "geturl", lambda: None)()
+            data = resp.read(max_bytes + 1)
+            truncated_bytes = False
+            if len(data) > max_bytes:
+                data = data[:max_bytes]
+                truncated_bytes = True
+            text = data.decode("utf-8", errors="replace")
+            val, truncated_json, err = _parse_json_text(text, max_chars=max_json_chars)
+            if err:
+                return HttpGetJsonResult(
+                    ok=False,
+                    url=url,
+                    final_url=str(final_url) if final_url else None,
+                    status=int(status) if status is not None else None,
+                    json=None,
+                    truncated=bool(truncated_bytes or truncated_json),
+                    error=err,
+                )
+            return HttpGetJsonResult(
+                ok=True,
+                url=url,
+                final_url=str(final_url) if final_url else None,
+                status=int(status) if status is not None else None,
+                json=val,
+                truncated=bool(truncated_bytes or truncated_json),
+                error=None,
+            )
+    except Exception as e:
+        return HttpGetJsonResult(ok=False, url=url, final_url=None, status=None, json=None, truncated=False, error=str(e))
 
