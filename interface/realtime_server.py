@@ -34,6 +34,7 @@ from core.task_manager import TaskStore, Task
 from core.agent_policy import AgentPolicy
 from core.evolution_engine import EvolutionEngine
 from core.evolution_manager import EvolutionManager
+from core.git_tools import git_status as _git_status, git_diff as _git_diff
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,25 @@ def _file_read_prefixes() -> List[str]:
     return prefs or ["artifacts/"]
 
 
+def _git_diff_prefixes() -> List[str]:
+    """
+    Allowed path prefixes for git diff requests via the UI.
+    Default: artifacts/ only (prevents leaking code/secrets to non-admins; even admin
+    should intentionally scope diffs).
+    """
+    raw = (os.getenv("CHAT_GIT_DIFF_PREFIXES") or "artifacts/").strip()
+    prefs = []
+    for p in raw.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("/"):
+            p = p.lstrip("/")
+        # Allow exact files too (no trailing slash required), but normalize below.
+        prefs.append(p)
+    return prefs or ["artifacts/"]
+
+
 def _normalize_rel_path(path: str) -> str:
     p = (path or "").strip().replace("\\", "/")
     if p.startswith("/"):
@@ -176,12 +196,19 @@ def _is_allowed_read_path(rel_path: str, prefixes: List[str]) -> bool:
     rel = _normalize_rel_path(rel_path)
     for pref in prefixes:
         pref_n = _normalize_rel_path(pref)
-        if pref_n and not pref_n.endswith("/"):
-            pref_n += "/"
-        if rel.startswith(pref_n):
-            return True
+        # If prefix ends with "/", treat as directory prefix; else treat as either exact file match or dir prefix.
+        if pref_n.endswith("/"):
+            if rel.startswith(pref_n):
+                return True
+        else:
+            if rel == pref_n or rel.startswith(pref_n.rstrip("/") + "/"):
+                return True
     return False
 
+
+def _is_allowed_git_path(rel_path: str, prefixes: List[str]) -> bool:
+    # Same semantics as file read allowlist, but separate env/config.
+    return _is_allowed_read_path(rel_path, prefixes)
 
 def _list_files_under(root: Path, rel_dir: str, *, limit: int = 200) -> List[str]:
     limit = max(1, min(int(limit), 500))
@@ -273,6 +300,7 @@ class RealtimeChatServer:
         self._origins = _allowed_origins()
         self.workspace_root = Path(os.getenv("DAWN_WORKSPACE_ROOT", "/workspace")).resolve()
         self.file_read_prefixes = _file_read_prefixes()
+        self.git_diff_prefixes = _git_diff_prefixes()
 
         # Optional: automatic evolution loop (safe: uses experiments + rollback).
         self.auto_evolution_enabled = os.getenv("AUTO_EVOLUTION", "false").lower() == "true"
@@ -828,6 +856,31 @@ class RealtimeChatServer:
                     "ts": time.time(),
                 },
             )
+            return
+
+        if msg_type == "get_git_status":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            porcelain = bool(payload.get("porcelain", True))
+            res = _git_status(self.workspace_root, porcelain=porcelain).to_dict()
+            await self._send(ws, {"type": "git_status", "result": res, "ts": time.time()})
+            return
+
+        if msg_type == "get_git_diff":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            path = str(payload.get("path") or "").strip()
+            if not path:
+                await self._send(ws, {"type": "error", "error": "path_required"})
+                return
+            if not _is_allowed_git_path(path, self.git_diff_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            staged = bool(payload.get("staged", False))
+            res = _git_diff(self.workspace_root, staged=staged, path=path).to_dict()
+            await self._send(ws, {"type": "git_diff", "result": res, "ts": time.time()})
             return
 
         await self._send(ws, {"type": "error", "error": "unknown_message_type"})
@@ -1523,6 +1576,8 @@ _INDEX_HTML = r"""<!doctype html>
     #file-viewer { white-space: pre-wrap; word-break: break-word; font-size: 12px; color:#cfc; margin-top:6px; border:1px dashed #0f0; padding:8px; }
     textarea { width: 100%; min-height: 90px; padding: 8px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box; }
     select { width: 100%; padding: 6px; border:1px solid #0f0; background:#000; color:#0f0; }
+    .miniBtn { padding: 4px 6px; border:1px solid #0f0; background:#001100; color:#0f0; cursor:pointer; font-size: 11px; }
+    .miniBtn:hover { border-color:#0ff; color:#0ff; }
     a { color:#0ff; }
   </style>
 </head>
@@ -1555,6 +1610,15 @@ _INDEX_HTML = r"""<!doctype html>
         <div><strong>Artifacts</strong></div>
         <div id="artifacts" class="hint">—</div>
         <div id="file-viewer" class="hint"> </div>
+        <div class="sep"></div>
+        <div><strong>Repo (admin)</strong></div>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="repo-status" class="miniBtn">status</button>
+          <button id="repo-diff" class="miniBtn">diff</button>
+        </div>
+        <div class="hint" style="margin-top:6px;">Diff path (allowlisted):</div>
+        <input id="repo-diff-path" placeholder="e.g. artifacts/ or core/orchestrator.py" style="width:100%; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
+        <div id="repo-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
         <div class="sep"></div>
         <div><strong>New Task</strong></div>
         <div class="hint">Assign to:</div>
@@ -1622,6 +1686,10 @@ _INDEX_HTML = r"""<!doctype html>
     const submitTaskBtn = document.getElementById('submit-task');
     const clearTaskBtn = document.getElementById('clear-task');
     const rateCommentEl = document.getElementById('rate-comment');
+    const repoStatusBtn = document.getElementById('repo-status');
+    const repoDiffBtn = document.getElementById('repo-diff');
+    const repoDiffPathEl = document.getElementById('repo-diff-path');
+    const repoOutEl = document.getElementById('repo-out');
 
     const msgEl = document.getElementById('msg');
     const sendBtn = document.getElementById('send');
@@ -1738,14 +1806,32 @@ _INDEX_HTML = r"""<!doctype html>
         return;
       }
       for (const p of artifacts.slice(0, 50)) {
-        const div = document.createElement('div');
-        div.className = 'taskItem';
-        div.textContent = p;
-        div.onclick = () => {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '8px';
+        row.style.alignItems = 'center';
+        row.style.justifyContent = 'space-between';
+
+        const pathEl = document.createElement('div');
+        pathEl.className = 'taskItem';
+        pathEl.style.flex = '1';
+        pathEl.textContent = p;
+        pathEl.onclick = () => {
           fileViewerEl.textContent = 'Loading file…';
           try { ws?.send(JSON.stringify({type:'get_file', path: p, max_bytes: 120000})); } catch {}
         };
-        artifactsEl.appendChild(div);
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'miniBtn';
+        copyBtn.textContent = 'copy';
+        copyBtn.onclick = (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          try { navigator.clipboard.writeText(p); } catch {}
+        };
+
+        row.appendChild(pathEl);
+        row.appendChild(copyBtn);
+        artifactsEl.appendChild(row);
       }
     }
 
@@ -1831,6 +1917,7 @@ _INDEX_HTML = r"""<!doctype html>
       taskDetailEl.textContent = ' ';
       artifactsEl.textContent = '—';
       fileViewerEl.textContent = ' ';
+      repoOutEl.textContent = ' ';
       selectedTaskDetail = null;
 
       ws.onmessage = (evt) => {
@@ -1849,6 +1936,7 @@ _INDEX_HTML = r"""<!doctype html>
           artifacts = [];
           renderArtifacts();
           fileViewerEl.textContent = ' ';
+          repoOutEl.textContent = ' ';
           selectedTaskDetail = null;
           return;
         }
@@ -1899,6 +1987,14 @@ _INDEX_HTML = r"""<!doctype html>
           fileViewerEl.textContent = header + (msg.content || '');
           return;
         }
+        if (msg.type === 'git_status' || msg.type === 'git_diff') {
+          const r = msg.result || {};
+          const head = `${r.cmd || 'git'} (exit=${r.exit_code})${r.truncated ? ' [truncated]' : ''}\\n`;
+          const out = (r.stdout || '').trim();
+          const err = (r.stderr || '').trim();
+          repoOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '');
+          return;
+        }
         if (msg.type === 'rated') {
           if (selectedTaskId) {
             try { ws?.send(JSON.stringify({type:'get_task', task_id: selectedTaskId})); } catch {}
@@ -1941,6 +2037,17 @@ _INDEX_HTML = r"""<!doctype html>
         rateCommentEl.value = '';
       };
     });
+
+    repoStatusBtn.onclick = () => {
+      repoOutEl.textContent = 'Loading git status…';
+      try { ws?.send(JSON.stringify({type:'get_git_status', porcelain:true})); } catch {}
+    };
+    repoDiffBtn.onclick = () => {
+      const p = (repoDiffPathEl.value || '').trim();
+      if (!p) { repoOutEl.textContent = 'Provide a diff path first.'; return; }
+      repoOutEl.textContent = 'Loading git diff…';
+      try { ws?.send(JSON.stringify({type:'get_git_diff', path: p, staged:false})); } catch {}
+    };
 
     connect();
     refreshMe();
