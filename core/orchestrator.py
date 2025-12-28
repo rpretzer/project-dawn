@@ -104,6 +104,12 @@ class AgentOrchestrator:
                 raise ValueError("path_outside_workspace")
             return cand
 
+        def _read_text(p: Path, *, max_bytes: int = 500_000) -> str:
+            data = p.read_bytes()
+            if len(data) > max_bytes:
+                raise ValueError("file_too_large")
+            return data.decode("utf-8", errors="replace")
+
         async def tool_spawn_agent(args: Dict[str, Any]) -> Dict[str, Any]:
             if not self.swarm:
                 return {"ok": False, "error": "swarm_unavailable"}
@@ -219,6 +225,38 @@ class AgentOrchestrator:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
+        async def tool_fs_patch(args: Dict[str, Any]) -> Dict[str, Any]:
+            """
+            Safely patch an existing text file via exact string replacement.
+            """
+            path = str(args.get("path") or "")
+            old = args.get("old")
+            new = args.get("new")
+            expected = int(args.get("expected_occurrences", 1))
+            if not isinstance(old, str) or not isinstance(new, str):
+                return {"ok": False, "error": "old_and_new_must_be_strings"}
+            if expected < 0 or expected > 50:
+                return {"ok": False, "error": "expected_occurrences_out_of_range"}
+            if len(old) < 1:
+                return {"ok": False, "error": "old_must_be_nonempty"}
+            if len(old) > 200_000 or len(new) > 200_000:
+                return {"ok": False, "error": "patch_too_large"}
+            try:
+                p = _resolve_safe(path)
+                if not p.exists() or not p.is_file():
+                    return {"ok": False, "error": "not_found"}
+                text = _read_text(p, max_bytes=500_000)
+                count = text.count(old)
+                if count != expected:
+                    return {"ok": False, "error": "unexpected_occurrence_count", "found": count, "expected": expected}
+                patched = text.replace(old, new)
+                if len(patched.encode("utf-8")) > 600_000:
+                    return {"ok": False, "error": "result_too_large"}
+                p.write_text(patched, encoding="utf-8")
+                return {"ok": True, "path": str(p.relative_to(self.workspace_root)), "replacements": count}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
         async def tool_http_get(args: Dict[str, Any]) -> Dict[str, Any]:
             url = str(args.get("url") or "").strip()
             max_bytes = int(args.get("max_bytes", 200_000))
@@ -285,6 +323,23 @@ class AgentOrchestrator:
                 },
             ),
             tool_fs_read,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="fs_patch",
+                description="Patch an existing UTF-8 text file by exact string replacement (safe).",
+                json_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "old": {"type": "string"},
+                        "new": {"type": "string"},
+                        "expected_occurrences": {"type": "integer", "minimum": 0, "maximum": 50},
+                    },
+                    "required": ["path", "old", "new"],
+                },
+            ),
+            tool_fs_patch,
         )
         self.tools.register(
             ToolSpec(
@@ -471,6 +526,7 @@ class AgentOrchestrator:
             f"- Keep <= {max(1, policy.max_plan_steps)} steps.\n"
             f"- Prefer delegation when appropriate (delegation_bias={policy.delegation_bias}).\n"
             "- If you need to create/update files as deliverables, use fs_write and write under artifacts/<task_id>/...\n"
+            "- If you need to modify existing files, prefer fs_patch (exact replacement) over rewriting whole files.\n"
             "- If you need to inspect repo state, use fs_list/fs_read.\n"
             "- If you need to reference external docs, use http_get (host allowlist applies).\n"
         )

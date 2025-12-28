@@ -1641,6 +1641,7 @@ _INDEX_HTML = r"""<!doctype html>
     let tasksById = new Map();
     let artifacts = [];
     let selectedTaskId = null;
+    let selectedTaskDetail = null; // {task, events, artifacts}
     let agents = [];
 
     function fmtTs(ts) {
@@ -1788,6 +1789,36 @@ _INDEX_HTML = r"""<!doctype html>
         .catch(() => { connect(); refreshMe(); });
     }
 
+    function renderSelectedTaskDetail() {
+      if (!selectedTaskDetail || !selectedTaskDetail.task) {
+        taskDetailEl.textContent = ' ';
+        return;
+      }
+      const t = selectedTaskDetail.task;
+      const evs = selectedTaskDetail.events || [];
+      const lines = [];
+      lines.push(`id=${t.id} status=${t.status} agent=${t.assigned_to}`);
+      lines.push(`title: ${t.title}`);
+      if (t.error) lines.push(`error: ${t.error}`);
+      if (t.result) { lines.push('result:'); lines.push(String(t.result)); }
+      if (evs.length) {
+        lines.push('events:');
+        for (const e of evs.slice(-50)) {
+          // normalize between server event dicts and live events
+          if (e.event_type) {
+            lines.push(`- ${e.id} ${e.event_type} ${JSON.stringify(e.payload)}`);
+          } else if (e.kind === 'progress') {
+            lines.push(`- live progress step=${e.step}: ${e.do}`);
+          } else if (e.kind === 'tool') {
+            lines.push(`- live tool: ${e.name}`);
+          } else {
+            lines.push(`- live ${JSON.stringify(e)}`);
+          }
+        }
+      }
+      taskDetailEl.textContent = lines.join('\\n');
+    }
+
     function connect() {
       if (ws) { try { ws.close(); } catch {} ws = null; }
       const url = new URL((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws');
@@ -1800,6 +1831,7 @@ _INDEX_HTML = r"""<!doctype html>
       taskDetailEl.textContent = ' ';
       artifactsEl.textContent = '—';
       fileViewerEl.textContent = ' ';
+      selectedTaskDetail = null;
 
       ws.onmessage = (evt) => {
         let msg;
@@ -1817,6 +1849,7 @@ _INDEX_HTML = r"""<!doctype html>
           artifacts = [];
           renderArtifacts();
           fileViewerEl.textContent = ' ';
+          selectedTaskDetail = null;
           return;
         }
         if (msg.type === 'message') {
@@ -1830,27 +1863,35 @@ _INDEX_HTML = r"""<!doctype html>
         if (msg.type === 'who') { setPresence(msg.presence || []); return; }
         if (msg.type === 'agents') { setAgents(msg.agents || []); setAgentOptions(msg.agents || []); return; }
         if (msg.type === 'tasks') { setTasks(msg.tasks || []); return; }
-        if (msg.type === 'task' && msg.task) { upsertTask(msg.task); return; }
+        if (msg.type === 'task') {
+          // Live task updates (status/progress/tool) for UI streaming.
+          if (msg.task) upsertTask(msg.task);
+          if (selectedTaskId) {
+            if (msg.task && msg.task.id === selectedTaskId) {
+              selectedTaskDetail = selectedTaskDetail || {task: msg.task, events: [], artifacts: artifacts};
+              selectedTaskDetail.task = msg.task;
+              renderSelectedTaskDetail();
+            } else if (msg.task_id && msg.task_id === selectedTaskId) {
+              selectedTaskDetail = selectedTaskDetail || {task: tasksById.get(selectedTaskId), events: [], artifacts: artifacts};
+              selectedTaskDetail.events = selectedTaskDetail.events || [];
+              if (msg.event === 'progress') {
+                selectedTaskDetail.events.push({kind:'progress', step: msg.step, do: msg.do, ts: msg.ts});
+              } else if (msg.event === 'tool') {
+                selectedTaskDetail.events.push({kind:'tool', name: msg.name, ts: msg.ts});
+              }
+              renderSelectedTaskDetail();
+            }
+          }
+          return;
+        }
         if (msg.type === 'task_detail') {
           const t = msg.task;
           if (t) upsertTask(t);
           const evs = msg.events || [];
           artifacts = msg.artifacts || [];
           renderArtifacts();
-          const lines = [];
-          if (t) {
-            lines.push(`id=${t.id} status=${t.status} agent=${t.assigned_to}`);
-            lines.push(`title: ${t.title}`);
-            if (t.error) lines.push(`error: ${t.error}`);
-            if (t.result) { lines.push('result:'); lines.push(String(t.result)); }
-          }
-          if (evs.length) {
-            lines.push('events:');
-            for (const e of evs.slice(-50)) {
-              lines.push(`- ${e.id} ${e.event_type} ${JSON.stringify(e.payload)}`);
-            }
-          }
-          taskDetailEl.textContent = lines.join('\\n');
+          selectedTaskDetail = {task: t, events: evs, artifacts: artifacts};
+          renderSelectedTaskDetail();
           return;
         }
         if (msg.type === 'file') {
