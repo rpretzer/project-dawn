@@ -4,7 +4,10 @@ A unified memory architecture treating memory as a first-class resource
 """
 
 import time
+import logging
 from typing import Dict, List, Optional, Any
+
+logger = logging.getLogger(__name__)
 from .core import MemCube, MemoryType, MemoryState
 from .interface import MemoryAPI, MemReader, MemoryPipeline
 from .vault import MemVault
