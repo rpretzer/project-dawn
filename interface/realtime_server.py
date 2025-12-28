@@ -26,6 +26,8 @@ from aiohttp import web, WSMsgType
 
 from .user_database import UserDatabase
 from .chat_store import ChatStore
+from core.orchestrator import AgentOrchestrator
+from core.task_manager import TaskStore
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +105,8 @@ class RealtimeChatServer:
 
         self.user_db = UserDatabase()
         self.chat_store = ChatStore()
+        self.task_store = TaskStore()
+        self.orchestrator = AgentOrchestrator(agents=self.consciousnesses, swarm=self.swarm, task_store=self.task_store)
 
         self._clients: Set[web.WebSocketResponse] = set()
         self._sessions: Dict[web.WebSocketResponse, ClientSession] = {}
@@ -111,6 +115,47 @@ class RealtimeChatServer:
         # Throttle LLM fanout
         self.max_agent_responses_per_message = int(os.getenv("MAX_AGENT_RESPONSES_PER_MESSAGE", "3"))
         self.agent_reply_timeout_seconds = float(os.getenv("AGENT_REPLY_TIMEOUT_SECONDS", "25"))
+
+        # Start orchestrator workers and wire event sink to broadcast to rooms
+        asyncio.create_task(self.orchestrator.start())
+        self.orchestrator.set_event_sink(self._orchestrator_event_sink)
+
+    async def _orchestrator_event_sink(self, event: Dict[str, Any]) -> None:
+        """
+        Convert orchestrator events into room messages and/or websocket events.
+
+        For now we broadcast task status updates to the relevant room as system lines.
+        """
+        try:
+            if event.get("type") != "task":
+                return
+            ev = str(event.get("event"))
+            if ev in ("started", "completed"):
+                task = event.get("task") or {}
+                room = str(task.get("room") or DEFAULT_ROOM)
+                task_id = str(task.get("id") or "")
+                status = str(task.get("status") or ev)
+                assigned_to = str(task.get("assigned_to") or "")
+                title = str(task.get("title") or "")
+                await self._system(room, f"[task {task_id}] {status} — {title} (agent: {assigned_to})")
+                return
+            if ev == "progress":
+                task_id = str(event.get("task_id") or "")
+                step = event.get("step")
+                do = str(event.get("do") or "")
+                task = self.task_store.get_task(task_id) if task_id else None
+                room = task.room if task else DEFAULT_ROOM
+                await self._system(room, f"[task {task_id}] step {step}: {do}")
+                return
+            if ev == "tool":
+                task_id = str(event.get("task_id") or "")
+                name = str(event.get("name") or "")
+                task = self.task_store.get_task(task_id) if task_id else None
+                room = task.room if task else DEFAULT_ROOM
+                await self._system(room, f"[task {task_id}] tool: {name}")
+                return
+        except Exception:
+            return
 
     def _room_sockets(self, room: str) -> Set[web.WebSocketResponse]:
         if room not in self._rooms:
@@ -360,7 +405,10 @@ class RealtimeChatServer:
         cmd = parts[0].lower()
 
         if cmd in ("/help", "/?"):
-            await self._system(room, "Commands: /help, /who, /agents, /ask <agent|all> <msg>, /spawn [n]")
+            await self._system(
+                room,
+                "Commands: /help, /who, /agents, /ask <agent|all> <msg>, /spawn [n], /task <agent|all> <work>, /tasks",
+            )
             return
 
         if cmd == "/who":
@@ -396,6 +444,26 @@ class RealtimeChatServer:
                 await self._spawn_agent(room)
             return
 
+        if cmd == "/tasks":
+            tasks = [t for t in self.orchestrator.task_store.list_recent(room=room, limit=20) if t]
+            if not tasks:
+                await self._system(room, "No tasks yet.")
+                return
+            lines = []
+            for t in tasks:
+                lines.append(f"{t.id} [{t.status}] {t.title} (agent: {t.assigned_to})")
+            await self._system(room, "Recent tasks:\n" + "\n".join(lines))
+            return
+
+        if cmd == "/task":
+            if len(parts) < 3:
+                await self._system(room, "Usage: /task <agent|all> <work description>")
+                return
+            target = parts[1]
+            work = _truncate_message(" ".join(parts[2:]), limit=8000)
+            await self._create_tasks(room, sess, target, work)
+            return
+
         if cmd == "/ask":
             if len(parts) < 3:
                 await self._system(room, "Usage: /ask <agent|all> <message>")
@@ -406,6 +474,33 @@ class RealtimeChatServer:
             return
 
         await self._system(room, f"Unknown command: {cmd}. Try /help.")
+
+    async def _create_tasks(self, room: str, sess: ClientSession, target: str, work: str) -> None:
+        agents = self._select_agents(target)
+        if not agents:
+            await self._system(room, f"No matching agent for '{target}'. Try /agents.")
+            return
+
+        created: List[str] = []
+        # If target is "all", create tasks for each agent but cap to avoid stampede.
+        if target.lower() == "all":
+            agents = agents[: max(1, self.max_agent_responses_per_message)]
+
+        for agent in agents:
+            agent_id = str(getattr(agent, "id", "agent"))
+            title = work.splitlines()[0][:80]
+            t = await self.orchestrator.submit_task(
+                room=room,
+                created_by=str(sess.sender_id or "guest"),
+                requested_by_name=str(sess.sender_name),
+                assigned_to=agent_id,
+                title=title,
+                prompt=work,
+                parent_task_id=None,
+            )
+            created.append(t.id)
+
+        await self._system(room, f"Queued task(s): {', '.join(created)}")
 
     async def _system(self, room: str, text: str) -> None:
         ts = time.time()
