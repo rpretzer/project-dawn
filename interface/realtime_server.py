@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ROOM = "lobby"
 TOKEN_COOKIE_NAME = os.getenv("CHAT_TOKEN_COOKIE", "dawn_token")
+CSRF_COOKIE_NAME = os.getenv("CHAT_CSRF_COOKIE", "dawn_csrf")
 ENV = (os.getenv("DAWN_ENV") or os.getenv("APP_ENV") or "dev").strip().lower()
 
 
@@ -122,6 +123,36 @@ def _allowed_origins() -> Optional[Set[str]]:
     if not raw:
         return None
     return {o.strip() for o in raw.split(",") if o.strip()}
+
+def _csrf_required() -> bool:
+    """
+    Require CSRF for browser POSTs in prod by default.
+    """
+    default = "true" if ENV == "prod" else "false"
+    return (os.getenv("CHAT_REQUIRE_CSRF") or default).lower() == "true"
+
+
+def _fetch_metadata_blocks_cross_site(headers: Dict[str, str]) -> bool:
+    """
+    Best-effort CSRF hardening using Fetch Metadata.
+    If browser reports a cross-site request, block it in prod.
+    """
+    if ENV != "prod":
+        return False
+    site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    # "none" can appear for top-level navigations or some non-browser clients.
+    return site == "cross-site"
+
+
+def _issue_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _constant_time_equal(a: str, b: str) -> bool:
+    try:
+        return secrets.compare_digest(str(a or ""), str(b or ""))
+    except Exception:
+        return False
 
 
 def _sanitize_room(room: Optional[str]) -> str:
@@ -499,6 +530,44 @@ class RealtimeChatServer:
             path="/",
         )
 
+    def _set_csrf_cookie(self, resp: web.Response, token: str, request: web.Request) -> None:
+        ttl = int(os.getenv("JWT_TTL_SECONDS", "86400"))
+        secure = (ENV == "prod") or (request.scheme == "https")
+        samesite = (os.getenv("CHAT_COOKIE_SAMESITE") or ("Strict" if ENV == "prod" else "Lax")).strip()
+        if samesite.lower() in ("strict", "lax", "none"):
+            samesite = samesite.title()
+        else:
+            samesite = "Lax"
+        resp.set_cookie(
+            CSRF_COOKIE_NAME,
+            token,
+            max_age=ttl,
+            httponly=False,
+            secure=secure,
+            samesite=samesite,
+            path="/",
+        )
+
+    def _require_csrf(self, request: web.Request) -> bool:
+        """
+        Require CSRF token when request is from a browser (has Origin).
+        Non-browser clients typically omit Origin and are not subject to CSRF.
+        """
+        if not _csrf_required():
+            return False
+        origin = request.headers.get("Origin")
+        return bool(origin)
+
+    def _check_csrf(self, request: web.Request) -> bool:
+        """
+        Double-submit: require X-CSRF-Token header matches CSRF cookie.
+        """
+        if not self._require_csrf(request):
+            return True
+        cookie = request.cookies.get(CSRF_COOKIE_NAME) or ""
+        header = request.headers.get("X-CSRF-Token") or ""
+        return bool(cookie and header and _constant_time_equal(cookie, header))
+
     async def _orchestrator_event_sink(self, event: Dict[str, Any]) -> None:
         """
         Convert orchestrator events into room messages and/or websocket events.
@@ -699,6 +768,16 @@ class RealtimeChatServer:
     async def http_health(self, request: web.Request) -> web.Response:
         return _json_response({"ok": True, "ts": time.time()})
 
+    async def http_csrf(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        token = _issue_csrf_token()
+        resp = _json_response({"success": True, "csrf_token": token})
+        self._set_csrf_cookie(resp, token, request)
+        return resp
+
     async def http_metrics(self, request: web.Request) -> web.Response:
         if not self.metrics_enabled:
             raise web.HTTPNotFound()
@@ -748,6 +827,10 @@ class RealtimeChatServer:
     async def http_register(self, request: web.Request) -> web.Response:
         if not self._check_origin(request):
             return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
         ip = request.remote or "unknown"
         if not self._check_auth_rate_limit(ip):
             return _json_response({"success": False, "error": "rate_limited"}, status=429)
@@ -787,6 +870,10 @@ class RealtimeChatServer:
     async def http_login(self, request: web.Request) -> web.Response:
         if not self._check_origin(request):
             return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
         ip = request.remote or "unknown"
         if not self._check_auth_rate_limit(ip):
             return _json_response({"success": False, "error": "rate_limited"}, status=429)
@@ -823,8 +910,13 @@ class RealtimeChatServer:
     async def http_logout(self, request: web.Request) -> web.Response:
         if not self._check_origin(request):
             return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
         resp = _json_response({"success": True})
         resp.del_cookie(TOKEN_COOKIE_NAME, path="/")
+        resp.del_cookie(CSRF_COOKIE_NAME, path="/")
         return resp
 
     async def http_me(self, request: web.Request) -> web.Response:
@@ -851,6 +943,8 @@ class RealtimeChatServer:
     async def ws_handler(self, request: web.Request) -> web.StreamResponse:
         if not self._check_origin(request):
             raise web.HTTPForbidden(text="origin_not_allowed")
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            raise web.HTTPForbidden(text="cross_site_blocked")
         self._metrics_counters["dawn_ws_connections_total"] += 1
         ws = web.WebSocketResponse(heartbeat=20, receive_timeout=60)
         await ws.prepare(request)
@@ -1983,6 +2077,7 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
     app.router.add_get("/healthz", server.http_health)
     app.router.add_get("/metrics", server.http_metrics)
     app.router.add_get("/admin/health", server.http_admin_health)
+    app.router.add_get("/api/csrf", server.http_csrf)
 
     app.router.add_post("/api/register", server.http_register)
     app.router.add_post("/api/login", server.http_login)
@@ -2228,6 +2323,7 @@ _INDEX_HTML = r"""<!doctype html>
     let selectedTaskDetail = null; // {task, events, artifacts}
     let agents = [];
     let selectedFilePath = null;
+    let csrfToken = null;
 
     function fmtTs(ts) {
       try { return new Date(ts * 1000).toLocaleTimeString([], {hour12:false}); } catch { return ''; }
@@ -2353,9 +2449,27 @@ _INDEX_HTML = r"""<!doctype html>
       }
     }
 
+    async function refreshCsrf() {
+      try {
+        const res = await fetch('/api/csrf', { method:'GET' });
+        const data = await res.json();
+        if (data && data.success && data.csrf_token) csrfToken = data.csrf_token;
+      } catch {}
+    }
+
     async function auth(path, payload) {
-      const res = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-      const data = await res.json();
+      if (!csrfToken) await refreshCsrf();
+      const headers = {'Content-Type':'application/json'};
+      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      let res = await fetch(path, { method:'POST', headers, body: JSON.stringify(payload) });
+      let data = null;
+      try { data = await res.json(); } catch { data = {success:false, error:'bad_json'}; }
+      if (!data.success && data.error === 'csrf_failed') {
+        await refreshCsrf();
+        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+        res = await fetch(path, { method:'POST', headers, body: JSON.stringify(payload) });
+        try { data = await res.json(); } catch { data = {success:false, error:'bad_json'}; }
+      }
       if (!data.success) throw new Error(data.error || 'auth_failed');
       return data;
     }
@@ -2387,10 +2501,16 @@ _INDEX_HTML = r"""<!doctype html>
     }
 
     function logout() {
-      fetch('/api/logout', { method:'POST' })
-        .then(() => connect())
-        .then(() => refreshMe())
-        .catch(() => { connect(); refreshMe(); });
+      (async () => {
+        try {
+          if (!csrfToken) await refreshCsrf();
+          const headers = {};
+          if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+          await fetch('/api/logout', { method:'POST', headers });
+        } catch {}
+        try { connect(); } catch {}
+        try { await refreshMe(); } catch {}
+      })();
     }
 
     function renderSelectedTaskDetail() {
@@ -2671,6 +2791,7 @@ _INDEX_HTML = r"""<!doctype html>
       try { ws?.send(JSON.stringify({type:'apply_patch', patch_path: selectedFilePath})); } catch {}
     };
 
+    refreshCsrf();
     connect();
     refreshMe();
     // Refresh presence periodically via /who (cheap and robust).

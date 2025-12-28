@@ -55,4 +55,6 @@ docker compose up --build
 ### Notes on origins/cookies
 - If you serve the UI behind a different origin than the API, you must set `CHAT_ALLOWED_ORIGINS` accordingly.
 - Cookie behavior is controlled via `CHAT_COOKIE_SAMESITE` (defaults to `Strict` in prod).
+- For browser clients in production, the server requires a **double-submit CSRF token** on auth-related POSTs (`/api/login`, `/api/register`, `/api/logout`) when `CHAT_REQUIRE_CSRF=true` (default in prod).
+  - Fetch a token from `GET /api/csrf` and include it as `X-CSRF-Token` on those POST requests.
 
