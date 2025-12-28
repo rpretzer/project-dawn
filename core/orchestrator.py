@@ -25,6 +25,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from core.task_manager import Task, TaskStore
 from core.agent_policy import PolicyStore, AgentPolicy
 from core.http_tools import http_get as _http_get
+from core.git_tools import git_status as _git_status, git_diff as _git_diff
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +265,20 @@ class AgentOrchestrator:
             res = _http_get(url, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
             return res.to_dict()
 
+        async def tool_git_status(args: Dict[str, Any]) -> Dict[str, Any]:
+            porcelain = bool(args.get("porcelain", True))
+            res = _git_status(self.workspace_root, porcelain=porcelain)
+            return res.to_dict()
+
+        async def tool_git_diff(args: Dict[str, Any]) -> Dict[str, Any]:
+            staged = bool(args.get("staged", False))
+            path = args.get("path")
+            path_s = str(path).strip() if path is not None else None
+            if path_s == "":
+                path_s = None
+            res = _git_diff(self.workspace_root, staged=staged, path=path_s)
+            return res.to_dict()
+
         self.tools.register(
             ToolSpec(
                 name="spawn_agent",
@@ -372,6 +387,31 @@ class AgentOrchestrator:
                 },
             ),
             tool_http_get,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="git_status",
+                description="Read-only: return git status of the workspace (no changes).",
+                json_schema={
+                    "type": "object",
+                    "properties": {"porcelain": {"type": "boolean"}},
+                },
+            ),
+            tool_git_status,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="git_diff",
+                description="Read-only: return git diff (optionally staged, optionally for a path).",
+                json_schema={
+                    "type": "object",
+                    "properties": {
+                        "staged": {"type": "boolean"},
+                        "path": {"type": "string"},
+                    },
+                },
+            ),
+            tool_git_diff,
         )
 
     def _ensure_worker_for_agent(self, agent: Any) -> None:
@@ -529,6 +569,7 @@ class AgentOrchestrator:
             "- If you need to modify existing files, prefer fs_patch (exact replacement) over rewriting whole files.\n"
             "- If you need to inspect repo state, use fs_list/fs_read.\n"
             "- If you need to reference external docs, use http_get (host allowlist applies).\n"
+            "- If you need to summarize changes you made, use git_status and git_diff (read-only).\n"
         )
         prompt = (
             f"{system}\n"
