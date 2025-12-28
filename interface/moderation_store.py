@@ -92,6 +92,45 @@ class ModerationStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS moderation_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    actor_user_id TEXT,
+                    actor_name TEXT,
+                    actor_ip TEXT,
+                    room TEXT,
+                    target TEXT,
+                    reason TEXT,
+                    created_at_ts REAL NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_moderation_events_time ON moderation_events(created_at_ts DESC)")
+            conn.commit()
+
+    def audit(
+        self,
+        *,
+        action: str,
+        actor_user_id: Optional[str],
+        actor_name: Optional[str],
+        actor_ip: Optional[str],
+        room: Optional[str],
+        target: Optional[str],
+        reason: Optional[str],
+    ) -> None:
+        now = time.time()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO moderation_events
+                (action, actor_user_id, actor_name, actor_ip, room, target, reason, created_at_ts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (action, actor_user_id, actor_name, actor_ip, room, target, reason, now),
+            )
             conn.commit()
 
     def get_room_settings(self, room: str) -> Dict[str, Any]:

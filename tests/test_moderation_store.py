@@ -13,3 +13,14 @@ def test_ban_and_mute(tmp_path):
     assert muted is True
     assert mreason == "spam"
 
+    # Audit log should not error
+    store.audit(
+        action="ban",
+        actor_user_id="1",
+        actor_name="admin",
+        actor_ip="127.0.0.1",
+        room="lobby",
+        target="user:123",
+        reason="bad",
+    )
+

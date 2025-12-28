@@ -374,6 +374,27 @@ class RealtimeChatServer:
         resp.del_cookie(TOKEN_COOKIE_NAME, path="/")
         return resp
 
+    async def http_me(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        token = request.cookies.get(TOKEN_COOKIE_NAME)
+        claims = _decode_token(token) if token else None
+        if not claims:
+            return _json_response({"success": True, "authenticated": False})
+        username = str(claims.get("username") or "").lower()
+        return _json_response(
+            {
+                "success": True,
+                "authenticated": True,
+                "user": {
+                    "id": str(claims.get("sub")),
+                    "username": username,
+                    "nickname": str(claims.get("nickname") or username),
+                },
+                "is_admin": bool(username and username in self.admin_usernames),
+            }
+        )
+
     async def ws_handler(self, request: web.Request) -> web.StreamResponse:
         if not self._check_origin(request):
             raise web.HTTPForbidden(text="origin_not_allowed")
@@ -578,6 +599,15 @@ class RealtimeChatServer:
                 await self._system(room, "Usage: /kick <nickname>")
                 return
             target = parts[1].strip().lower()
+            self.moderation.audit(
+                action="kick",
+                actor_user_id=sess.sender_id,
+                actor_name=sess.sender_name,
+                actor_ip=sess.ip,
+                room=room,
+                target=target,
+                reason=None,
+            )
             await self._kick_by_nick(room, target)
             return
 
@@ -600,6 +630,15 @@ class RealtimeChatServer:
                 reason = " ".join(parts[3:])
             ok = await self._mute_by_nick(room, target, seconds, reason)
             if ok:
+                self.moderation.audit(
+                    action="mute",
+                    actor_user_id=sess.sender_id,
+                    actor_name=sess.sender_name,
+                    actor_ip=sess.ip,
+                    room=room,
+                    target=target,
+                    reason=reason,
+                )
                 await self._system(room, f"Muted {target}.")
             else:
                 await self._system(room, f"Could not mute {target}.")
@@ -627,6 +666,15 @@ class RealtimeChatServer:
                 await self._system(room, "kind must be 'user' or 'ip'")
                 return
             self.moderation.set_ban(kind=kind, value=value, reason=reason, duration_seconds=seconds)
+            self.moderation.audit(
+                action="ban",
+                actor_user_id=sess.sender_id,
+                actor_name=sess.sender_name,
+                actor_ip=sess.ip,
+                room=room,
+                target=f"{kind}:{value}",
+                reason=reason,
+            )
             await self._system(room, f"Banned {kind}:{value}.")
             return
 
@@ -648,6 +696,15 @@ class RealtimeChatServer:
             else:
                 await self._system(room, "Unknown room setting.")
                 return
+            self.moderation.audit(
+                action="room_setting",
+                actor_user_id=sess.sender_id,
+                actor_name=sess.sender_name,
+                actor_ip=sess.ip,
+                room=room,
+                target=f"{key}={on}",
+                reason=None,
+            )
             await self._system(room, f"Room setting updated: {key}={on}")
             return
 
@@ -864,6 +921,7 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
     app.router.add_post("/api/register", server.http_register)
     app.router.add_post("/api/login", server.http_login)
     app.router.add_post("/api/logout", server.http_logout)
+    app.router.add_get("/api/me", server.http_me)
     app.router.add_get("/ws", server.ws_handler)
 
     async def _on_cleanup(app_: web.Application) -> None:
@@ -960,6 +1018,7 @@ _INDEX_HTML = r"""<!doctype html>
           <button id="register">register</button>
           <button id="logout">logout</button>
         </div>
+        <div class="hint" id="auth-status" style="margin-top:8px;">auth: unknown</div>
         <div class="hint">
           Try: <code>/help</code>, <code>/agents</code>, <code>/ask all ...</code>, <code>/spawn</code>
         </div>
@@ -988,6 +1047,7 @@ _INDEX_HTML = r"""<!doctype html>
     const loginBtn = document.getElementById('login');
     const registerBtn = document.getElementById('register');
     const logoutBtn = document.getElementById('logout');
+    const authStatusEl = document.getElementById('auth-status');
 
     // Auth uses an HttpOnly cookie (set by /api/login or /api/register).
     // We intentionally do NOT store tokens in localStorage or put them in URLs.
@@ -1033,20 +1093,37 @@ _INDEX_HTML = r"""<!doctype html>
       return data;
     }
 
+    async function refreshMe() {
+      try {
+        const res = await fetch('/api/me');
+        const data = await res.json();
+        if (data.success && data.authenticated) {
+          authStatusEl.textContent = `auth: ${data.user.nickname} (${data.user.username})${data.is_admin ? ' [admin]' : ''}`;
+        } else {
+          authStatusEl.textContent = 'auth: guest';
+        }
+      } catch {
+        authStatusEl.textContent = 'auth: unknown';
+      }
+    }
+
     async function login() {
       await auth('/api/login', { username: uEl.value.trim(), password: pEl.value });
       connect();
+      await refreshMe();
     }
 
     async function register() {
       await auth('/api/register', { username: uEl.value.trim(), password: pEl.value, nickname: nEl.value.trim() || undefined });
       connect();
+      await refreshMe();
     }
 
     function logout() {
       fetch('/api/logout', { method:'POST' })
         .then(() => connect())
-        .catch(() => connect());
+        .then(() => refreshMe())
+        .catch(() => { connect(); refreshMe(); });
     }
 
     function connect() {
@@ -1101,6 +1178,7 @@ _INDEX_HTML = r"""<!doctype html>
     logoutBtn.onclick = logout;
 
     connect();
+    refreshMe();
     // Refresh presence periodically via /who (cheap and robust).
     setInterval(() => { try { ws?.send(JSON.stringify({ type:'chat', room, content: '/who' })); } catch {} }, 8000);
   </script>
