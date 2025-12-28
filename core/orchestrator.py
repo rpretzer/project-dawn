@@ -24,6 +24,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from core.task_manager import Task, TaskStore
 from core.agent_policy import PolicyStore, AgentPolicy
+from core.http_tools import http_get as _http_get
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,13 @@ class AgentOrchestrator:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
+        async def tool_http_get(args: Dict[str, Any]) -> Dict[str, Any]:
+            url = str(args.get("url") or "").strip()
+            max_bytes = int(args.get("max_bytes", 200_000))
+            timeout_seconds = float(args.get("timeout_seconds", 10.0))
+            res = _http_get(url, max_bytes=max_bytes, timeout_seconds=timeout_seconds)
+            return res.to_dict()
+
         self.tools.register(
             ToolSpec(
                 name="spawn_agent",
@@ -293,6 +301,22 @@ class AgentOrchestrator:
                 },
             ),
             tool_fs_write,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="http_get",
+                description="Fetch a URL (safe allowlist) and return text content.",
+                json_schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string"},
+                        "max_bytes": {"type": "integer", "minimum": 1000, "maximum": 1000000},
+                        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 30},
+                    },
+                    "required": ["url"],
+                },
+            ),
+            tool_http_get,
         )
 
     def _ensure_worker_for_agent(self, agent: Any) -> None:
@@ -448,6 +472,7 @@ class AgentOrchestrator:
             f"- Prefer delegation when appropriate (delegation_bias={policy.delegation_bias}).\n"
             "- If you need to create/update files as deliverables, use fs_write and write under artifacts/<task_id>/...\n"
             "- If you need to inspect repo state, use fs_list/fs_read.\n"
+            "- If you need to reference external docs, use http_get (host allowlist applies).\n"
         )
         prompt = (
             f"{system}\n"
