@@ -208,6 +208,55 @@ class TaskStore:
                 tasks.append(t)
         return tasks
 
+    def list_recent_for_agent(
+        self,
+        *,
+        assigned_to: str,
+        since_ts: Optional[float] = None,
+        limit: int = 50,
+    ) -> List[Task]:
+        """
+        List tasks for a specific agent, newest first.
+
+        Uses the idx_tasks_assignee_time index.
+        """
+        limit = max(1, min(int(limit), 200))
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if since_ts is not None:
+                cur = conn.execute(
+                    """
+                    SELECT id
+                    FROM tasks
+                    WHERE assigned_to = ? AND created_at_ts >= ?
+                    ORDER BY created_at_ts DESC
+                    LIMIT ?
+                    """,
+                    (str(assigned_to), float(since_ts), limit),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT id
+                    FROM tasks
+                    WHERE assigned_to = ?
+                    ORDER BY created_at_ts DESC
+                    LIMIT ?
+                    """,
+                    (str(assigned_to), limit),
+                )
+            rows = list(cur.fetchall())
+        out: List[Task] = []
+        for r in rows:
+            try:
+                task_id = str(r["id"])
+            except Exception:
+                continue
+            t = self.get_task(task_id)
+            if t:
+                out.append(t)
+        return out
+
     def update_status(self, task_id: str, status: TaskStatus, *, result: Optional[str] = None, error: Optional[str] = None) -> Optional[Task]:
         now = time.time()
         with sqlite3.connect(self.db_path) as conn:

@@ -86,16 +86,17 @@ class PolicyStore:
             updated_at_ts=float(row[1] or 0.0),
         )
 
-    def set_policy(self, policy: AgentPolicy) -> None:
+    def set_policy(self, policy: AgentPolicy) -> int:
         now = time.time()
         payload = policy.to_dict()
         payload["updated_at_ts"] = now
         with sqlite3.connect(self.db_path) as conn:
             # Always keep an append-only history for rollback/debugging.
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO agent_policy_history (agent_id, policy_json, created_at_ts) VALUES (?, ?, ?)",
                 (policy.agent_id, json.dumps(payload, ensure_ascii=False), now),
             )
+            history_id = int(cur.lastrowid)
             conn.execute(
                 """
                 INSERT INTO agent_policies (agent_id, policy_json, updated_at_ts)
@@ -107,6 +108,20 @@ class PolicyStore:
                 (policy.agent_id, json.dumps(payload, ensure_ascii=False), now),
             )
             conn.commit()
+        return history_id
+
+    def latest_history_id(self, agent_id: str) -> Optional[int]:
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT id FROM agent_policy_history WHERE agent_id = ? ORDER BY id DESC LIMIT 1",
+                (str(agent_id),),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return int(row[0])
+        except Exception:
+            return None
 
     def list_history(self, agent_id: str, *, limit: int = 20) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 200))

@@ -32,6 +32,7 @@ from core.orchestrator import AgentOrchestrator
 from core.task_manager import TaskStore
 from core.agent_policy import AgentPolicy
 from core.evolution_engine import EvolutionEngine
+from core.evolution_manager import EvolutionManager
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,13 @@ class RealtimeChatServer:
         self.orchestrator = AgentOrchestrator(agents=self.consciousnesses, swarm=self.swarm, task_store=self.task_store)
         self.moderation = ModerationStore()
         self.evolution = EvolutionEngine(task_store=self.task_store, policy_store=self.orchestrator.policy_store)
+        self.evolution_manager = EvolutionManager(
+            task_store=self.task_store,
+            policy_store=self.orchestrator.policy_store,
+            evolution_engine=self.evolution,
+        )
+
+        self._bg_tasks: List[asyncio.Task[Any]] = []
 
         self._clients: Set[web.WebSocketResponse] = set()
         self._sessions: Dict[web.WebSocketResponse, ClientSession] = {}
@@ -149,9 +157,18 @@ class RealtimeChatServer:
         self.admin_usernames = {u.strip().lower() for u in (os.getenv("CHAT_ADMIN_USERNAMES") or "").split(",") if u.strip()}
 
         # Start orchestrator workers and wire event sink to broadcast to rooms
-        asyncio.create_task(self.orchestrator.start())
+        self._bg_tasks.append(asyncio.create_task(self.orchestrator.start()))
         self.orchestrator.set_event_sink(self._orchestrator_event_sink)
         self._origins = _allowed_origins()
+
+        # Optional: automatic evolution loop (safe: uses experiments + rollback).
+        self.auto_evolution_enabled = os.getenv("AUTO_EVOLUTION", "false").lower() == "true"
+        self.auto_evolution_interval_s = float(os.getenv("AUTO_EVOLUTION_INTERVAL_SECONDS", "60"))
+        self.auto_evolution_min_tasks_to_start = int(os.getenv("AUTO_EVOLUTION_MIN_TASKS_TO_START", "5"))
+        self.auto_evolution_min_tasks_after = int(os.getenv("AUTO_EVOLUTION_MIN_TASKS_AFTER", "5"))
+        self.auto_evolution_regression_threshold = float(os.getenv("AUTO_EVOLUTION_REGRESSION_THRESHOLD", "0.08"))
+        if self.auto_evolution_enabled:
+            self._bg_tasks.append(asyncio.create_task(self._auto_evolution_loop()))
 
     def _check_origin(self, request: web.Request) -> bool:
         # In dev, allow everything.
@@ -252,6 +269,46 @@ class RealtimeChatServer:
             if cid == aid:
                 return str(getattr(c, "name", cid or "Agent"))
         return aid or "Agent"
+
+    async def stop(self) -> None:
+        # Cancel background tasks (auto evolution + orchestrator start task)
+        for t in list(self._bg_tasks):
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        await asyncio.gather(*self._bg_tasks, return_exceptions=True)
+        self._bg_tasks.clear()
+
+    async def _auto_evolution_loop(self) -> None:
+        # Best-effort; never raise.
+        while True:
+            try:
+                # First, finalize experiments (may rollback).
+                finalized = self.evolution_manager.check_pending_and_finalize(
+                    regression_threshold=self.auto_evolution_regression_threshold
+                )
+                for exp in finalized:
+                    # Keep the room spam-free; log only.
+                    logger.info(f"Evolution experiment finalized: {exp.to_dict()}")
+
+                # Then, start new experiments for agents with enough recent tasks and no pending.
+                for a in list(self.consciousnesses):
+                    aid = str(getattr(a, "id", "agent"))
+                    if self.evolution_manager.has_pending(aid):
+                        continue
+                    recent = self.task_store.list_recent_for_agent(assigned_to=aid, limit=max(1, self.auto_evolution_min_tasks_to_start))
+                    done = [t for t in recent if t.status in ("completed", "failed")]
+                    if len(done) < max(1, self.auto_evolution_min_tasks_to_start):
+                        continue
+                    try:
+                        exp = self.evolution_manager.start_experiment(agent_id=aid, min_tasks_after=self.auto_evolution_min_tasks_after)
+                        logger.info(f"Started evolution experiment: {exp.to_dict()}")
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            await asyncio.sleep(max(10.0, self.auto_evolution_interval_s))
 
     def _room_sockets(self, room: str) -> Set[web.WebSocketResponse]:
         if room not in self._rooms:
@@ -615,6 +672,7 @@ class RealtimeChatServer:
                 "Commands: /help, /who, /join <room>, /agents, /ask <agent|all> <msg>, /spawn [n], /task <agent|all> <work>, /tasks"
                 + ", /rate <task_id> <1-5> [comment], /policy <agent_id> show|set …, /fitness [agent_id|all]"
                 + (", /evolve [agent_id|all]" if sess.is_admin else "")
+                + (", /evolution status [agent_id]" if sess.is_admin else "")
                 + (" | Admin: /kick, /mute, /ban, /room" if sess.is_admin else ""),
             )
             return
@@ -945,9 +1003,55 @@ class RealtimeChatServer:
             await self._system(room, "Evolution applied:\n" + "\n".join(lines))
             return
 
+        if cmd == "/evolution":
+            if not sess.is_admin:
+                await self._system(room, "Permission denied.")
+                return
+            # /evolution status [agent_id]
+            if len(parts) < 2 or parts[1].lower() != "status":
+                await self._system(room, "Usage: /evolution status [agent_id]")
+                return
+            agent_id = parts[2].strip() if len(parts) >= 3 else None
+            exps = self.evolution_manager.list_experiments(agent_id=agent_id, limit=10)
+            if not exps:
+                await self._system(room, "No experiments yet.")
+                return
+            lines = []
+            for e in exps:
+                lines.append(
+                    f"id={e.id} agent={e.agent_id} status={e.status} base={e.baseline_score:.3f} new={(f'{e.new_score:.3f}' if e.new_score is not None else 'n/a')} decision={e.decision or '—'}"
+                )
+            await self._system(room, "Evolution experiments:\n" + "\n".join(lines))
+            return
+
         if cmd == "/task":
+            # /task show <task_id>
+            if len(parts) >= 3 and parts[1].strip().lower() == "show":
+                task_id = parts[2].strip()
+                t = self.orchestrator.task_store.get_task(task_id)
+                if not t:
+                    await self._system(room, f"Unknown task: {task_id}")
+                    return
+                evs = self.orchestrator.task_store.get_events(task_id, after_id=0, limit=50)
+                lines = [
+                    f"id={t.id} room={t.room} status={t.status} agent={t.assigned_to}",
+                    f"title: {t.title}",
+                ]
+                if t.error:
+                    lines.append(f"error: {t.error}")
+                if t.result:
+                    lines.append("result:")
+                    lines.append(str(t.result))
+                if evs:
+                    lines.append("events (latest 50):")
+                    for e in evs[-50:]:
+                        lines.append(f"- {e.id} {e.event_type} {e.payload}")
+                await self._system(room, "\n".join(lines))
+                return
+
+            # /task <agent|all> <work description>
             if len(parts) < 3:
-                await self._system(room, "Usage: /task <agent|all> <work description>")
+                await self._system(room, "Usage: /task <agent|all> <work description> OR /task show <task_id>")
                 return
             target = parts[1]
             work = _truncate_message(" ".join(parts[2:]), limit=8000)
@@ -1127,6 +1231,10 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
         srv: RealtimeChatServer = app_["server"]
         try:
             await srv.orchestrator.stop()
+        except Exception:
+            pass
+        try:
+            await srv.stop()
         except Exception:
             pass
 

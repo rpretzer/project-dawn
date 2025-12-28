@@ -231,6 +231,15 @@ class AgentOrchestrator:
                 await self._run_task(agent, task_id)
             except Exception as e:
                 logger.error(f"Worker error for {agent_id} on {task_id}: {e}")
+                # Ensure task is marked failed (otherwise it can remain "running" forever).
+                t = self.task_store.get_task(task_id)
+                if t and t.status not in ("completed", "failed", "cancelled"):
+                    self.task_store.update_status(task_id, "failed", error=str(e))
+                    self.task_store.append_event(task_id, "failed", {"error": str(e)})
+                    try:
+                        await self._emit({"type": "task", "event": "failed", "task": self.task_store.get_task(task_id).to_dict()})
+                    except Exception:
+                        pass
             finally:
                 q.task_done()
 

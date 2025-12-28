@@ -86,22 +86,15 @@ class EvolutionEngine:
             return latest
         return None
 
-    def _list_recent_tasks_for_agent(self, agent_id: str) -> List[Task]:
-        # TaskStore doesn't yet have a dedicated index query API, so we read recent global tasks
-        # and filter. This is acceptable for now; can be optimized later.
-        all_recent = self.task_store.list_recent(room=None, limit=self.window_tasks * 10)
-        tasks: List[Task] = []
-        for t in all_recent:
-            if not t:
-                continue
-            if t.assigned_to == agent_id:
-                tasks.append(t)
-            if len(tasks) >= self.window_tasks:
-                break
-        return tasks
+    def _list_recent_tasks_for_agent(self, agent_id: str, *, since_ts: Optional[float] = None) -> List[Task]:
+        return self.task_store.list_recent_for_agent(
+            assigned_to=str(agent_id),
+            since_ts=since_ts,
+            limit=self.window_tasks,
+        )
 
-    def evaluate_agent(self, agent_id: str) -> FitnessReport:
-        tasks = self._list_recent_tasks_for_agent(agent_id)
+    def evaluate_agent(self, agent_id: str, *, since_ts: Optional[float] = None) -> FitnessReport:
+        tasks = self._list_recent_tasks_for_agent(agent_id, since_ts=since_ts)
         completed = sum(1 for t in tasks if t.status == "completed")
         failed = sum(1 for t in tasks if t.status == "failed")
 
