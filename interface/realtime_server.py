@@ -19,6 +19,7 @@ import os
 import secrets
 import time
 import subprocess
+import ipaddress
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import deque, defaultdict
@@ -28,6 +29,7 @@ import jwt
 from aiohttp import web, WSMsgType
 
 from .user_database import UserDatabase
+from .session_store import SessionStore, PasswordResetStore
 from .chat_store import ChatStore
 from .moderation_store import ModerationStore
 from core.orchestrator import AgentOrchestrator
@@ -44,6 +46,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_ROOM = "lobby"
 TOKEN_COOKIE_NAME = os.getenv("CHAT_TOKEN_COOKIE", "dawn_token")
 CSRF_COOKIE_NAME = os.getenv("CHAT_CSRF_COOKIE", "dawn_csrf")
+REFRESH_COOKIE_NAME = os.getenv("CHAT_REFRESH_COOKIE", "dawn_refresh")
 ENV = (os.getenv("DAWN_ENV") or os.getenv("APP_ENV") or "dev").strip().lower()
 
 JWT_ALG = "HS256"
@@ -74,6 +77,43 @@ def _jwt_secrets() -> List[str]:
 
 JWT_SECRETS = _jwt_secrets()
 JWT_SECRET_CURRENT = JWT_SECRETS[0]
+
+
+def _jwt_access_ttl_seconds() -> int:
+    # Backward compatible: default to JWT_TTL_SECONDS if new var not set.
+    raw = (os.getenv("JWT_ACCESS_TTL_SECONDS") or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except Exception:
+            pass
+    return int(os.getenv("JWT_TTL_SECONDS", "86400"))
+
+
+def _jwt_refresh_ttl_seconds() -> int:
+    raw = (os.getenv("JWT_REFRESH_TTL_SECONDS") or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except Exception:
+            pass
+    # 30 days default for refresh sessions
+    return int(os.getenv("JWT_REFRESH_TTL_SECONDS", str(30 * 24 * 3600)))
+
+
+def _session_token_secret() -> str:
+    # Optional dedicated secret for hashing refresh/reset tokens.
+    # If not set, reuse the current JWT secret.
+    return (os.getenv("SESSION_TOKEN_SECRET") or JWT_SECRET_CURRENT).strip()
+
+
+def _admin_action_token_required() -> bool:
+    default = "true" if ENV == "prod" else "false"
+    return (os.getenv("CHAT_REQUIRE_ADMIN_ACTION_TOKEN") or default).lower() == "true"
+
+
+def _admin_action_token_value() -> str:
+    return (os.getenv("CHAT_ADMIN_ACTION_TOKEN") or "").strip()
 
 
 def _prom_escape_label_value(v: str) -> str:
@@ -109,6 +149,7 @@ class ClientSession:
     sender_name: str  # nickname / guest name
     ip: str
     is_admin: bool = False
+    admin_action_ok: bool = False
 
 
 def _json_response(payload: Dict[str, Any], *, status: int = 200) -> web.Response:
@@ -117,7 +158,7 @@ def _json_response(payload: Dict[str, Any], *, status: int = 200) -> web.Respons
 
 def _issue_token(*, user_id: int, username: str, nickname: str) -> str:
     now = int(time.time())
-    exp = now + int(os.getenv("JWT_TTL_SECONDS", "86400"))  # 24h default
+    exp = now + int(_jwt_access_ttl_seconds())
     return jwt.encode(
         {"sub": str(user_id), "username": username, "nickname": nickname, "iat": now, "exp": exp},
         JWT_SECRET_CURRENT,
@@ -390,6 +431,8 @@ class RealtimeChatServer:
         self.swarm = swarm
 
         self.user_db = UserDatabase()
+        self.session_store = SessionStore(Path(os.getenv("DAWN_AUTH_DB", "data/users.db")), token_secret=_session_token_secret())
+        self.password_reset_store = PasswordResetStore(Path(os.getenv("DAWN_AUTH_DB", "data/users.db")), token_secret=_session_token_secret())
         self.chat_store = ChatStore()
         self.task_store = TaskStore()
         self.orchestrator = AgentOrchestrator(
@@ -434,6 +477,14 @@ class RealtimeChatServer:
         # Policy defaults
         self.allow_guests_default = os.getenv("CHAT_ALLOW_GUESTS", "true" if ENV != "prod" else "false").lower() == "true"
         self.admin_usernames = {u.strip().lower() for u in (os.getenv("CHAT_ADMIN_USERNAMES") or "").split(",") if u.strip()}
+        self.require_admin_action_token = _admin_action_token_required()
+        self.admin_action_token = _admin_action_token_value()
+        if ENV == "prod" and self.require_admin_action_token and not self.admin_action_token:
+            raise RuntimeError("CHAT_ADMIN_ACTION_TOKEN must be set when CHAT_REQUIRE_ADMIN_ACTION_TOKEN=true in prod")
+        self.admin_allowed_nets = self._parse_admin_allowed_ips(os.getenv("CHAT_ADMIN_ALLOWED_IPS") or "")
+        self.admin_require_mtls = (os.getenv("CHAT_ADMIN_REQUIRE_MTLS") or "false").lower() == "true"
+        self.mtls_verify_header = (os.getenv("CHAT_MTLS_VERIFY_HEADER") or "X-Client-Verify").strip()
+        self.mtls_verify_value = (os.getenv("CHAT_MTLS_VERIFY_VALUE") or "SUCCESS").strip()
 
         # Start orchestrator workers and wire event sink to broadcast to rooms
         self._bg_tasks.append(asyncio.create_task(self.orchestrator.start()))
@@ -513,6 +564,47 @@ class RealtimeChatServer:
         username = str(claims.get("username") or "").lower()
         return bool(username and username in self.admin_usernames)
 
+    def _parse_admin_allowed_ips(self, raw: str) -> List[ipaddress._BaseNetwork]:
+        nets: List[ipaddress._BaseNetwork] = []
+        for part in (raw or "").split(","):
+            s = part.strip()
+            if not s:
+                continue
+            try:
+                if "/" in s:
+                    nets.append(ipaddress.ip_network(s, strict=False))
+                else:
+                    # single host
+                    ip = ipaddress.ip_address(s)
+                    if ip.version == 4:
+                        nets.append(ipaddress.ip_network(f"{s}/32", strict=False))
+                    else:
+                        nets.append(ipaddress.ip_network(f"{s}/128", strict=False))
+            except Exception:
+                continue
+        return nets
+
+    def _admin_ip_allowed(self, request: web.Request) -> bool:
+        if not self.admin_allowed_nets:
+            return True
+        ip = request.remote or ""
+        try:
+            addr = ipaddress.ip_address(ip)
+        except Exception:
+            return False
+        return any(addr in net for net in self.admin_allowed_nets)
+
+    def _admin_mtls_ok(self, request: web.Request) -> bool:
+        if not self.admin_require_mtls:
+            return True
+        val = (request.headers.get(self.mtls_verify_header) or "").strip()
+        return val == self.mtls_verify_value
+
+    def _check_admin_action_token(self, token: Optional[str]) -> bool:
+        if not self.require_admin_action_token:
+            return True
+        return _constant_time_equal(str(token or ""), self.admin_action_token)
+
     def _check_origin(self, request: web.Request) -> bool:
         # In dev, allow everything.
         if ENV != "prod":
@@ -528,7 +620,7 @@ class RealtimeChatServer:
         return origin in self._origins
 
     def _set_auth_cookie(self, resp: web.Response, token: str, request: web.Request) -> None:
-        ttl = int(os.getenv("JWT_TTL_SECONDS", "86400"))
+        ttl = int(_jwt_access_ttl_seconds())
         secure = (ENV == "prod") or (request.scheme == "https")
         samesite = (os.getenv("CHAT_COOKIE_SAMESITE") or ("Strict" if ENV == "prod" else "Lax")).strip()
         if samesite.lower() in ("strict", "lax", "none"):
@@ -547,7 +639,7 @@ class RealtimeChatServer:
         )
 
     def _set_csrf_cookie(self, resp: web.Response, token: str, request: web.Request) -> None:
-        ttl = int(os.getenv("JWT_TTL_SECONDS", "86400"))
+        ttl = int(_jwt_access_ttl_seconds())
         secure = (ENV == "prod") or (request.scheme == "https")
         samesite = (os.getenv("CHAT_COOKIE_SAMESITE") or ("Strict" if ENV == "prod" else "Lax")).strip()
         if samesite.lower() in ("strict", "lax", "none"):
@@ -559,6 +651,24 @@ class RealtimeChatServer:
             token,
             max_age=ttl,
             httponly=False,
+            secure=secure,
+            samesite=samesite,
+            path="/",
+        )
+
+    def _set_refresh_cookie(self, resp: web.Response, refresh_token: str, request: web.Request) -> None:
+        ttl = int(_jwt_refresh_ttl_seconds())
+        secure = (ENV == "prod") or (request.scheme == "https")
+        samesite = (os.getenv("CHAT_COOKIE_SAMESITE") or ("Strict" if ENV == "prod" else "Lax")).strip()
+        if samesite.lower() in ("strict", "lax", "none"):
+            samesite = samesite.title()
+        else:
+            samesite = "Lax"
+        resp.set_cookie(
+            REFRESH_COOKIE_NAME,
+            refresh_token,
+            max_age=ttl,
+            httponly=True,
             secure=secure,
             samesite=samesite,
             path="/",
@@ -817,6 +927,10 @@ class RealtimeChatServer:
     async def http_admin_health(self, request: web.Request) -> web.Response:
         if not self._check_origin(request):
             return _json_response({"ok": False, "error": "origin_not_allowed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"ok": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"ok": False, "error": "admin_mtls_required"}, status=403)
         if not self._is_admin_http(request):
             return _json_response({"ok": False, "error": "permission_denied"}, status=403)
         self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
@@ -831,6 +945,132 @@ class RealtimeChatServer:
                 "recent_errors": list(self._recent_errors),
             }
         )
+
+    async def http_admin_users_list(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        include_inactive = (request.query.get("include_inactive") or "false").lower() == "true"
+        users = self.user_db.list_users(include_inactive=include_inactive, limit=int(request.query.get("limit") or "200"))
+        return _json_response({"success": True, "users": users})
+
+    async def http_admin_user_deactivate(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        if not self._check_admin_action_token(request.headers.get("X-Admin-Action-Token")):
+            return _json_response({"success": False, "error": "admin_action_token_required"}, status=403)
+        username = (request.match_info.get("username") or "").strip()
+        user = self.user_db.get_user_by_username_any(username)
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=404)
+        ok = self.user_db.set_active(int(user["id"]), False)
+        if ok:
+            try:
+                self.session_store.revoke_user_sessions(int(user["id"]))
+            except Exception:
+                pass
+            self._ops("admin_user_deactivate", {"user_id": str(user["id"]), "username": str(user["username"])})
+        return _json_response({"success": bool(ok)})
+
+    async def http_admin_user_reactivate(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        if not self._check_admin_action_token(request.headers.get("X-Admin-Action-Token")):
+            return _json_response({"success": False, "error": "admin_action_token_required"}, status=403)
+        username = (request.match_info.get("username") or "").strip()
+        user = self.user_db.get_user_by_username_any(username)
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=404)
+        ok = self.user_db.set_active(int(user["id"]), True)
+        if ok:
+            self._ops("admin_user_reactivate", {"user_id": str(user["id"]), "username": str(user["username"])})
+        return _json_response({"success": bool(ok)})
+
+    async def http_admin_user_set_password(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        if not self._check_admin_action_token(request.headers.get("X-Admin-Action-Token")):
+            return _json_response({"success": False, "error": "admin_action_token_required"}, status=403)
+        username = (request.match_info.get("username") or "").strip()
+        user = self.user_db.get_user_by_username_any(username)
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=404)
+        try:
+            data = await request.json()
+        except Exception:
+            return _json_response({"success": False, "error": "invalid_json"}, status=400)
+        new_password = (data.get("new_password") or "").strip()
+        if len(new_password) < 8:
+            return _json_response({"success": False, "error": "password_too_short"}, status=400)
+        import bcrypt
+
+        password_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        ok = self.user_db.update_password(int(user["id"]), password_hash)
+        if ok:
+            try:
+                self.session_store.revoke_user_sessions(int(user["id"]))
+            except Exception:
+                pass
+            self._ops("admin_user_set_password", {"user_id": str(user["id"]), "username": str(user["username"])})
+        return _json_response({"success": bool(ok)})
+
+    async def http_admin_user_revoke_sessions(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        if not self._check_admin_action_token(request.headers.get("X-Admin-Action-Token")):
+            return _json_response({"success": False, "error": "admin_action_token_required"}, status=403)
+        username = (request.match_info.get("username") or "").strip()
+        user = self.user_db.get_user_by_username_any(username)
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=404)
+        n = int(self.session_store.revoke_user_sessions(int(user["id"])))
+        self._ops("admin_user_revoke_sessions", {"user_id": str(user["id"]), "username": str(user["username"]), "count": n})
+        return _json_response({"success": True, "revoked": n})
 
     def _check_auth_rate_limit(self, ip: str) -> bool:
         now = time.time()
@@ -879,8 +1119,17 @@ class RealtimeChatServer:
             return _json_response({"success": False, "error": err or "registration_failed"}, status=400)
 
         token = _issue_token(user_id=user_id, username=username.strip().lower(), nickname=nickname)
+        ip = request.remote or "unknown"
+        ua = request.headers.get("User-Agent")
+        _, refresh_token = self.session_store.create_session(
+            user_id=int(user_id),
+            ip=ip,
+            user_agent=ua,
+            ttl_seconds=int(_jwt_refresh_ttl_seconds()),
+        )
         resp = _json_response({"success": True, "token": token, "user": {"id": user_id, "username": username, "nickname": nickname}})
         self._set_auth_cookie(resp, token, request)
+        self._set_refresh_cookie(resp, refresh_token, request)
         return resp
 
     async def http_login(self, request: web.Request) -> web.Response:
@@ -921,6 +1170,15 @@ class RealtimeChatServer:
         token = _issue_token(user_id=int(user["id"]), username=user["username"], nickname=nickname)
         resp = _json_response({"success": True, "token": token, "user": {"id": user["id"], "username": user["username"], "nickname": nickname}})
         self._set_auth_cookie(resp, token, request)
+        ip = request.remote or "unknown"
+        ua = request.headers.get("User-Agent")
+        _, refresh_token = self.session_store.create_session(
+            user_id=int(user["id"]),
+            ip=ip,
+            user_agent=ua,
+            ttl_seconds=int(_jwt_refresh_ttl_seconds()),
+        )
+        self._set_refresh_cookie(resp, refresh_token, request)
         return resp
 
     async def http_logout(self, request: web.Request) -> web.Response:
@@ -930,8 +1188,15 @@ class RealtimeChatServer:
             return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
         if not self._check_csrf(request):
             return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        try:
+            rt = request.cookies.get(REFRESH_COOKIE_NAME)
+            if rt:
+                self.session_store.revoke_token(rt)
+        except Exception:
+            pass
         resp = _json_response({"success": True})
         resp.del_cookie(TOKEN_COOKIE_NAME, path="/")
+        resp.del_cookie(REFRESH_COOKIE_NAME, path="/")
         resp.del_cookie(CSRF_COOKIE_NAME, path="/")
         return resp
 
@@ -955,6 +1220,104 @@ class RealtimeChatServer:
                 "is_admin": bool(username and username in self.admin_usernames),
             }
         )
+
+    async def http_refresh(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        rt = request.cookies.get(REFRESH_COOKIE_NAME)
+        if not rt:
+            return _json_response({"success": False, "error": "no_refresh_token"}, status=401)
+        ip = request.remote or "unknown"
+        ua = request.headers.get("User-Agent")
+        rotated = self.session_store.rotate(
+            refresh_token=rt,
+            ip=ip,
+            user_agent=ua,
+            ttl_seconds=int(_jwt_refresh_ttl_seconds()),
+        )
+        if not rotated:
+            return _json_response({"success": False, "error": "invalid_refresh_token"}, status=401)
+        user_id, _, new_rt = rotated
+        user = self.user_db.get_user_by_id(int(user_id))
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=401)
+        nickname = user.get("nickname") or user["username"]
+        token = _issue_token(user_id=int(user["id"]), username=user["username"], nickname=nickname)
+        resp = _json_response({"success": True, "token": token})
+        self._set_auth_cookie(resp, token, request)
+        self._set_refresh_cookie(resp, new_rt, request)
+        return resp
+
+    async def http_password_reset_request(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        try:
+            data = await request.json()
+        except Exception:
+            return _json_response({"success": False, "error": "invalid_json"}, status=400)
+        username = (data.get("username") or "").strip()
+        ip = request.remote or "unknown"
+        user = self.user_db.get_user_by_username(username)
+        # Do not leak whether user exists.
+        reset_token: Optional[str] = None
+        if user:
+            try:
+                _, reset_token = self.password_reset_store.issue(
+                    user_id=int(user["id"]),
+                    ttl_seconds=int(os.getenv("PASSWORD_RESET_TTL_SECONDS", "3600")),
+                    requested_ip=ip,
+                )
+                self._ops("password_reset_issued", {"user_id": str(user["id"]), "ip": ip})
+            except Exception:
+                pass
+        payload: Dict[str, Any] = {"success": True}
+        # Dev convenience: return token unless explicitly disabled.
+        if reset_token and (ENV != "prod") and (os.getenv("DAWN_RETURN_RESET_TOKEN", "true").lower() == "true"):
+            payload["reset_token"] = reset_token
+        return _json_response(payload)
+
+    async def http_password_reset_confirm(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        try:
+            data = await request.json()
+        except Exception:
+            return _json_response({"success": False, "error": "invalid_json"}, status=400)
+        token = (data.get("reset_token") or "").strip()
+        new_password = (data.get("new_password") or "").strip()
+        if not token or not new_password:
+            return _json_response({"success": False, "error": "token_and_new_password_required"}, status=400)
+        if len(new_password) < 8:
+            return _json_response({"success": False, "error": "password_too_short"}, status=400)
+        user_id = self.password_reset_store.consume(token=token)
+        if not user_id:
+            return _json_response({"success": False, "error": "invalid_or_expired_token"}, status=400)
+        # Hash and store
+        import bcrypt
+
+        password_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        ok = self.user_db.update_password(int(user_id), password_hash)
+        if not ok:
+            return _json_response({"success": False, "error": "password_update_failed"}, status=500)
+        # Revoke existing refresh sessions for safety.
+        try:
+            self.session_store.revoke_user_sessions(int(user_id))
+        except Exception:
+            pass
+        self._ops("password_reset_consumed", {"user_id": str(user_id)})
+        return _json_response({"success": True})
 
     async def ws_handler(self, request: web.Request) -> web.StreamResponse:
         if not self._check_origin(request):
@@ -1257,6 +1620,16 @@ class RealtimeChatServer:
             await self._send(ws, {"type": "ops_events", "enabled": True, "events": evs, "ts": time.time()})
             return
 
+        if msg_type == "set_admin_action_token":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            tok = str(payload.get("token") or "")
+            ok = self._check_admin_action_token(tok)
+            sess.admin_action_ok = bool(ok)
+            await self._send(ws, {"type": "admin_action_token", "ok": bool(ok), "ts": time.time()})
+            return
+
         if msg_type == "check_patch":
             if not sess.is_admin:
                 await self._send(ws, {"type": "error", "error": "permission_denied"})
@@ -1367,6 +1740,9 @@ class RealtimeChatServer:
         if msg_type == "apply_patch":
             if not sess.is_admin:
                 await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._send(ws, {"type": "error", "error": "admin_action_token_required"})
                 return
             patch_path = str(payload.get("patch_path") or "").strip()
             if not patch_path:
@@ -1522,6 +1898,9 @@ class RealtimeChatServer:
             if not sess.is_admin:
                 await self._system(room, "Permission denied.")
                 return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._system(room, "Admin action token required (use admin UI to set it).")
+                return
             if len(parts) < 2:
                 await self._system(room, "Usage: /kick <nickname>")
                 return
@@ -1541,6 +1920,9 @@ class RealtimeChatServer:
         if cmd == "/mute":
             if not sess.is_admin:
                 await self._system(room, "Permission denied.")
+                return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._system(room, "Admin action token required (use admin UI to set it).")
                 return
             if len(parts) < 2:
                 await self._system(room, "Usage: /mute <nickname> [seconds] [reason...]")
@@ -1575,6 +1957,9 @@ class RealtimeChatServer:
             if not sess.is_admin:
                 await self._system(room, "Permission denied.")
                 return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._system(room, "Admin action token required (use admin UI to set it).")
+                return
             if len(parts) < 3:
                 await self._system(room, "Usage: /ban <user|ip> <value> [seconds] [reason...]")
                 return
@@ -1608,6 +1993,9 @@ class RealtimeChatServer:
         if cmd == "/room":
             if not sess.is_admin:
                 await self._system(room, "Permission denied.")
+                return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._system(room, "Admin action token required (use admin UI to set it).")
                 return
             # /room read_only on|off ; /room allow_guests on|off
             if len(parts) < 3:
@@ -2098,7 +2486,16 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
     app.router.add_post("/api/register", server.http_register)
     app.router.add_post("/api/login", server.http_login)
     app.router.add_post("/api/logout", server.http_logout)
+    app.router.add_post("/api/refresh", server.http_refresh)
+    app.router.add_post("/api/password_reset/request", server.http_password_reset_request)
+    app.router.add_post("/api/password_reset/confirm", server.http_password_reset_confirm)
     app.router.add_get("/api/me", server.http_me)
+
+    app.router.add_get("/admin/users", server.http_admin_users_list)
+    app.router.add_post("/admin/users/{username}/deactivate", server.http_admin_user_deactivate)
+    app.router.add_post("/admin/users/{username}/reactivate", server.http_admin_user_reactivate)
+    app.router.add_post("/admin/users/{username}/set_password", server.http_admin_user_set_password)
+    app.router.add_post("/admin/users/{username}/revoke_sessions", server.http_admin_user_revoke_sessions)
     app.router.add_get("/ws", server.ws_handler)
 
     async def _on_cleanup(app_: web.Application) -> None:
@@ -2210,6 +2607,10 @@ _INDEX_HTML = r"""<!doctype html>
           <button id="patch-check" class="miniBtn">check patch</button>
           <button id="patch-apply" class="miniBtn dangerBtn">apply patch</button>
         </div>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <input id="admin-action-token" placeholder="admin action token" style="flex:1; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
+          <button id="set-admin-token" class="miniBtn">set</button>
+        </div>
         <div id="patch-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
         <div class="sep"></div>
         <div><strong>Repo (admin)</strong></div>
@@ -2316,6 +2717,8 @@ _INDEX_HTML = r"""<!doctype html>
     const opsOutEl = document.getElementById('ops-out');
     const patchCheckBtn = document.getElementById('patch-check');
     const patchApplyBtn = document.getElementById('patch-apply');
+    const adminTokenEl = document.getElementById('admin-action-token');
+    const setAdminTokenBtn = document.getElementById('set-admin-token');
     const patchOutEl = document.getElementById('patch-out');
 
     const msgEl = document.getElementById('msg');
@@ -2340,6 +2743,7 @@ _INDEX_HTML = r"""<!doctype html>
     let agents = [];
     let selectedFilePath = null;
     let csrfToken = null;
+    let didTryRefresh = false;
 
     function fmtTs(ts) {
       try { return new Date(ts * 1000).toLocaleTimeString([], {hour12:false}); } catch { return ''; }
@@ -2490,6 +2894,16 @@ _INDEX_HTML = r"""<!doctype html>
       return data;
     }
 
+    async function refreshSession() {
+      if (!csrfToken) await refreshCsrf();
+      const headers = {};
+      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      const res = await fetch('/api/refresh', { method:'POST', headers });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'refresh_failed');
+      return data;
+    }
+
     async function refreshMe() {
       try {
         const res = await fetch('/api/me');
@@ -2497,6 +2911,11 @@ _INDEX_HTML = r"""<!doctype html>
         if (data.success && data.authenticated) {
           authStatusEl.textContent = `auth: ${data.user.nickname} (${data.user.username})${data.is_admin ? ' [admin]' : ''}`;
         } else {
+          // Best-effort: if we have a refresh session cookie, try refreshing once.
+          if (!didTryRefresh) {
+            didTryRefresh = true;
+            try { await refreshSession(); return await refreshMe(); } catch {}
+          }
           authStatusEl.textContent = 'auth: guest';
         }
       } catch {
@@ -2657,6 +3076,10 @@ _INDEX_HTML = r"""<!doctype html>
           patchOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '') + extra;
           return;
         }
+        if (msg.type === 'admin_action_token') {
+          patchOutEl.textContent = msg.ok ? 'Admin action token set (OK).' : 'Admin action token rejected.';
+          return;
+        }
         if (msg.type === 'patch_stat') {
           const head = `patch_stat ${msg.ok ? 'OK' : 'FAIL'} (exit=${msg.exit_code ?? 'n/a'})\\n`;
           const out = (msg.stdout || '').trim();
@@ -2805,6 +3228,16 @@ _INDEX_HTML = r"""<!doctype html>
       }
       patchOutEl.textContent = 'Applying patch…';
       try { ws?.send(JSON.stringify({type:'apply_patch', patch_path: selectedFilePath})); } catch {}
+    };
+
+    setAdminTokenBtn.onclick = () => {
+      const tok = (adminTokenEl?.value || '').trim();
+      if (!tok) {
+        patchOutEl.textContent = 'Enter admin action token first.';
+        return;
+      }
+      patchOutEl.textContent = 'Setting admin token…';
+      try { ws?.send(JSON.stringify({type:'set_admin_action_token', token: tok})); } catch {}
     };
 
     refreshCsrf();

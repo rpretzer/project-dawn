@@ -6,6 +6,7 @@ Project Dawn is a framework for running multiple LLM-backed **agents** with pers
 
 See `ROADMAP.md` for planned feature work and milestones.
 See `DEPLOYMENT.md` for production deployment guidance.
+See `RUNBOOK.md` for operational procedures (rotation, backups, incidents).
 
 ## Features
 
