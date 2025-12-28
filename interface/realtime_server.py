@@ -133,6 +133,91 @@ def _task_public(t: Task) -> Dict[str, Any]:
     }
 
 
+def _file_read_prefixes() -> List[str]:
+    """
+    Comma-separated allowed prefixes (workspace-relative) for file reads from the UI.
+    Default: artifacts/ only (prevents leaking .env, keys, etc.).
+    """
+    raw = (os.getenv("CHAT_FILE_READ_PREFIXES") or "artifacts/").strip()
+    prefs = []
+    for p in raw.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("/"):
+            p = p.lstrip("/")
+        if not p.endswith("/"):
+            p = p + "/"
+        prefs.append(p)
+    return prefs or ["artifacts/"]
+
+
+def _normalize_rel_path(path: str) -> str:
+    p = (path or "").strip().replace("\\", "/")
+    if p.startswith("/"):
+        p = p.lstrip("/")
+    # Remove redundant leading ./ segments.
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _resolve_under_root(root: Path, rel_path: str) -> Path:
+    rel = _normalize_rel_path(rel_path)
+    if not rel:
+        raise ValueError("path_required")
+    cand = (root / rel).resolve()
+    if root not in cand.parents and cand != root:
+        raise ValueError("path_outside_workspace")
+    return cand
+
+
+def _is_allowed_read_path(rel_path: str, prefixes: List[str]) -> bool:
+    rel = _normalize_rel_path(rel_path)
+    for pref in prefixes:
+        pref_n = _normalize_rel_path(pref)
+        if pref_n and not pref_n.endswith("/"):
+            pref_n += "/"
+        if rel.startswith(pref_n):
+            return True
+    return False
+
+
+def _list_files_under(root: Path, rel_dir: str, *, limit: int = 200) -> List[str]:
+    limit = max(1, min(int(limit), 500))
+    d = _resolve_under_root(root, rel_dir)
+    if not d.exists() or not d.is_dir():
+        return []
+    out: List[str] = []
+    for p in d.rglob("*"):
+        try:
+            if p.is_dir():
+                continue
+            rp = p.resolve()
+            if root not in rp.parents and rp != root:
+                continue
+            out.append(str(rp.relative_to(root)))
+            if len(out) >= limit:
+                break
+        except Exception:
+            continue
+    return sorted(out)[:limit]
+
+
+def _read_text_file(root: Path, rel_path: str, *, max_bytes: int = 100_000) -> Dict[str, Any]:
+    max_bytes = max(1000, min(int(max_bytes), 500_000))
+    p = _resolve_under_root(root, rel_path)
+    if not p.exists() or not p.is_file():
+        return {"ok": False, "error": "not_found"}
+    data = p.read_bytes()
+    truncated = False
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+        truncated = True
+    text = data.decode("utf-8", errors="replace")
+    return {"ok": True, "path": str(p.relative_to(root)), "content": text, "truncated": truncated}
+
+
 def _is_command(text: str) -> bool:
     return text.strip().startswith("/")
 
@@ -186,6 +271,8 @@ class RealtimeChatServer:
         self._bg_tasks.append(asyncio.create_task(self.orchestrator.start()))
         self.orchestrator.set_event_sink(self._orchestrator_event_sink)
         self._origins = _allowed_origins()
+        self.workspace_root = Path(os.getenv("DAWN_WORKSPACE_ROOT", "/workspace")).resolve()
+        self.file_read_prefixes = _file_read_prefixes()
 
         # Optional: automatic evolution loop (safe: uses experiments + rollback).
         self.auto_evolution_enabled = os.getenv("AUTO_EVOLUTION", "false").lower() == "true"
@@ -656,12 +743,41 @@ class RealtimeChatServer:
                 await self._send(ws, {"type": "error", "error": "unknown_task"})
                 return
             evs = self.task_store.get_events(task_id, after_id=0, limit=200)
+            artifacts = _list_files_under(self.workspace_root, f"artifacts/{task_id}", limit=200)
             await self._send(
                 ws,
                 {
                     "type": "task_detail",
                     "task": _task_public(t),
                     "events": [e.to_dict() for e in evs],
+                    "artifacts": artifacts,
+                    "ts": time.time(),
+                },
+            )
+            return
+
+        if msg_type == "get_file":
+            rel_path = str(payload.get("path") or "").strip()
+            if not rel_path:
+                await self._send(ws, {"type": "error", "error": "path_required"})
+                return
+            if not _is_allowed_read_path(rel_path, self.file_read_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            try:
+                res = _read_text_file(self.workspace_root, rel_path, max_bytes=int(payload.get("max_bytes") or 100_000))
+            except Exception as e:
+                res = {"ok": False, "error": str(e)}
+            if not res.get("ok"):
+                await self._send(ws, {"type": "error", "error": res.get("error") or "read_failed"})
+                return
+            await self._send(
+                ws,
+                {
+                    "type": "file",
+                    "path": res["path"],
+                    "content": res.get("content") or "",
+                    "truncated": bool(res.get("truncated")),
                     "ts": time.time(),
                 },
             )
@@ -1357,6 +1473,7 @@ _INDEX_HTML = r"""<!doctype html>
     .taskItem { cursor:pointer; color:#9f9; font-size: 12px; margin: 6px 0; }
     .taskItem:hover { color:#0ff; }
     #task-detail { white-space: pre-wrap; word-break: break-word; font-size: 12px; color:#cfc; margin-top:6px; }
+    #file-viewer { white-space: pre-wrap; word-break: break-word; font-size: 12px; color:#cfc; margin-top:6px; border:1px dashed #0f0; padding:8px; }
     a { color:#0ff; }
   </style>
 </head>
@@ -1385,6 +1502,10 @@ _INDEX_HTML = r"""<!doctype html>
         </div>
         <div id="tasks" class="hint">—</div>
         <div id="task-detail" class="hint"> </div>
+        <div class="sep"></div>
+        <div><strong>Artifacts</strong></div>
+        <div id="artifacts" class="hint">—</div>
+        <div id="file-viewer" class="hint"> </div>
         <div class="sep"></div>
         <div><strong>Auth</strong></div>
         <div class="auth">
@@ -1421,6 +1542,8 @@ _INDEX_HTML = r"""<!doctype html>
     const tasksEl = document.getElementById('tasks');
     const taskDetailEl = document.getElementById('task-detail');
     const refreshTasksBtn = document.getElementById('refresh-tasks');
+    const artifactsEl = document.getElementById('artifacts');
+    const fileViewerEl = document.getElementById('file-viewer');
 
     const msgEl = document.getElementById('msg');
     const sendBtn = document.getElementById('send');
@@ -1438,6 +1561,7 @@ _INDEX_HTML = r"""<!doctype html>
     let ws = null;
     let room = 'lobby';
     let tasksById = new Map();
+    let artifacts = [];
 
     function fmtTs(ts) {
       try { return new Date(ts * 1000).toLocaleTimeString([], {hour12:false}); } catch { return ''; }
@@ -1487,6 +1611,9 @@ _INDEX_HTML = r"""<!doctype html>
         div.textContent = `${t.status} ${t.id} (${t.assigned_to}) — ${t.title}`;
         div.onclick = () => {
           taskDetailEl.textContent = 'Loading task…';
+          artifacts = [];
+          artifactsEl.textContent = '—';
+          fileViewerEl.textContent = ' ';
           try { ws?.send(JSON.stringify({type:'get_task', task_id: t.id})); } catch {}
         };
         tasksEl.appendChild(div);
@@ -1505,6 +1632,24 @@ _INDEX_HTML = r"""<!doctype html>
       if (!t || !t.id) return;
       tasksById.set(t.id, t);
       renderTasks();
+    }
+
+    function renderArtifacts() {
+      artifactsEl.innerHTML = '';
+      if (!artifacts || !artifacts.length) {
+        artifactsEl.textContent = '—';
+        return;
+      }
+      for (const p of artifacts.slice(0, 50)) {
+        const div = document.createElement('div');
+        div.className = 'taskItem';
+        div.textContent = p;
+        div.onclick = () => {
+          fileViewerEl.textContent = 'Loading file…';
+          try { ws?.send(JSON.stringify({type:'get_file', path: p, max_bytes: 120000})); } catch {}
+        };
+        artifactsEl.appendChild(div);
+      }
     }
 
     async function auth(path, payload) {
@@ -1557,6 +1702,8 @@ _INDEX_HTML = r"""<!doctype html>
       agentsEl.textContent = '—';
       tasksEl.textContent = '—';
       taskDetailEl.textContent = ' ';
+      artifactsEl.textContent = '—';
+      fileViewerEl.textContent = ' ';
 
       ws.onmessage = (evt) => {
         let msg;
@@ -1570,6 +1717,9 @@ _INDEX_HTML = r"""<!doctype html>
           setAgents(msg.agents || []);
           setPresence(msg.presence || []);
           setTasks(msg.tasks || []);
+          artifacts = [];
+          renderArtifacts();
+          fileViewerEl.textContent = ' ';
           return;
         }
         if (msg.type === 'message') {
@@ -1588,6 +1738,8 @@ _INDEX_HTML = r"""<!doctype html>
           const t = msg.task;
           if (t) upsertTask(t);
           const evs = msg.events || [];
+          artifacts = msg.artifacts || [];
+          renderArtifacts();
           const lines = [];
           if (t) {
             lines.push(`id=${t.id} status=${t.status} agent=${t.assigned_to}`);
@@ -1602,6 +1754,11 @@ _INDEX_HTML = r"""<!doctype html>
             }
           }
           taskDetailEl.textContent = lines.join('\\n');
+          return;
+        }
+        if (msg.type === 'file') {
+          const header = `[${msg.path}]${msg.truncated ? ' (truncated)' : ''}\\n\\n`;
+          fileViewerEl.textContent = header + (msg.content || '');
           return;
         }
       };
