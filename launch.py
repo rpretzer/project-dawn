@@ -29,6 +29,12 @@ except ImportError:
     except ImportError:
         run_dashboard = None
 
+# Optional realtime chat server (aiohttp + websockets)
+try:
+    from interface.realtime_server import run_realtime_server
+except Exception:
+    run_realtime_server = None
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -222,6 +228,7 @@ async def main():
     parser.add_argument('creator_wallet', nargs='?', help='Creator wallet address for revenue distribution')
     parser.add_argument('--count', type=int, default=3, help='Number of consciousnesses to create')
     parser.add_argument('--dashboard', action='store_true', help='Launch web dashboard')
+    parser.add_argument('--realtime', action='store_true', help='Launch realtime chat server (WebSocket)')
     parser.add_argument('--port', type=int, default=8000, help='Dashboard port')
     parser.add_argument('--safemode', action='store_true', help='Safe mode: Skip optional systems, minimal initialization for debugging')
     
@@ -256,28 +263,44 @@ async def main():
     try:
         # Start swarm (with safemode if requested)
         await swarm.start_swarm(args.count, args.creator_wallet, safemode=args.safemode)
-        
-        # Start dashboard FIRST (before stats, which may fail)
+
+        # Start realtime server (preferred for real-time multi-user chat)
+        realtime_runner = None
+        if args.realtime:
+            if run_realtime_server:
+                try:
+                    realtime_runner = await run_realtime_server(swarm.consciousnesses, args.port, swarm)
+                    print(f"\n💬 Realtime chat: http://localhost:{args.port}")
+                    print("   WebSocket endpoint: /ws")
+                    print("   Commands: /help, /ask, /agents, /spawn")
+                except Exception as e:
+                    logger.error(f"Failed to start realtime server: {e}")
+                    print("\n⚠️  Realtime server failed to start")
+            else:
+                print("\n⚠️  Realtime server not available (interface.realtime_server import failed)")
+
+        # Start legacy dashboard (polling). Kept for backward compatibility.
         dashboard_started = False
         if args.dashboard:
+            # Avoid port conflict if realtime server is running.
+            dashboard_port = (args.port + 1) if realtime_runner else args.port
             if run_dashboard:
                 try:
-                    # Run in separate thread
+                    # Run in separate thread (Flask dev server blocks)
                     import threading
                     dashboard_thread = threading.Thread(
                         target=run_dashboard,
-                        args=(swarm.consciousnesses, args.port, swarm),
+                        args=(swarm.consciousnesses, dashboard_port, swarm),
                         daemon=True
                     )
                     dashboard_thread.start()
                     dashboard_started = True
-                    
+
                     # Give dashboard a moment to start
-                    await asyncio.sleep(3)
-                    
-                    print(f"\n📊 Dashboard: http://localhost:{args.port}")
-                    print("   The dashboard is now running in your browser!")
-                    print("   Features: Chat, Spawn, Conversation Monitor")
+                    await asyncio.sleep(2)
+
+                    print(f"\n📊 Legacy dashboard: http://localhost:{dashboard_port}")
+                    print("   (Polling-based; prefer --realtime for true multi-user real-time chat.)")
                 except Exception as e:
                     logger.error(f"Failed to start dashboard: {e}")
                     print("\n⚠️  Dashboard failed to start")
@@ -298,11 +321,11 @@ async def main():
             print(f"   Consciousnesses: {len(swarm.consciousnesses)}")
             print(f"   Active: {sum(1 for c in swarm.consciousnesses if c.active)}")
         
-        # Open browser if dashboard started
-        if dashboard_started:
+        # Open browser if any UI started
+        if dashboard_started or realtime_runner:
             try:
                 import subprocess
-                subprocess.Popen(['xdg-open', f'http://localhost:{args.port}'], 
+                subprocess.Popen(['xdg-open', f'http://localhost:{args.port}'],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except:
                 try:
@@ -329,6 +352,13 @@ async def main():
         import traceback
         logger.error(traceback.format_exc())
     finally:
+        # Stop realtime server if running
+        try:
+            if 'realtime_runner' in locals() and realtime_runner:
+                await realtime_runner.cleanup()
+        except Exception:
+            pass
+
         await swarm.stop_swarm()
 
 if __name__ == "__main__":
