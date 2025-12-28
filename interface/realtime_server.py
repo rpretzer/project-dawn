@@ -36,6 +36,7 @@ from core.agent_policy import AgentPolicy
 from core.evolution_engine import EvolutionEngine
 from core.evolution_manager import EvolutionManager
 from core.git_tools import git_status as _git_status, git_diff as _git_diff
+from core.ops_log import OpsLogStore
 
 logger = logging.getLogger(__name__)
 
@@ -403,6 +404,11 @@ class RealtimeChatServer:
         self._metrics_gauges: Dict[str, int] = defaultdict(int)
         self._metrics_info: Dict[str, str] = {"env": ENV, "version": "dawn"}
 
+        # Structured ops log (optional)
+        self.ops_log_enabled = os.getenv("DAWN_OPS_LOG_ENABLED", "true" if ENV == "prod" else "false").lower() == "true"
+        self.ops_log = OpsLogStore(Path(os.getenv("DAWN_OPS_DB", "data/ops.db"))) if self.ops_log_enabled else None
+        self._recent_errors: deque = deque(maxlen=50)
+
         # Optional: automatic evolution loop (safe: uses experiments + rollback).
         self.auto_evolution_enabled = os.getenv("AUTO_EVOLUTION", "false").lower() == "true"
         self.auto_evolution_interval_s = float(os.getenv("AUTO_EVOLUTION_INTERVAL_SECONDS", "60"))
@@ -411,6 +417,38 @@ class RealtimeChatServer:
         self.auto_evolution_regression_threshold = float(os.getenv("AUTO_EVOLUTION_REGRESSION_THRESHOLD", "0.08"))
         if self.auto_evolution_enabled:
             self._bg_tasks.append(asyncio.create_task(self._auto_evolution_loop()))
+
+    def _log_json(self, level: str, payload: Dict[str, Any]) -> None:
+        record = {"ts": time.time(), **(payload or {})}
+        try:
+            line = json.dumps(record, ensure_ascii=False)
+        except Exception:
+            return
+        try:
+            if level == "error":
+                logger.error(line)
+            elif level == "warning":
+                logger.warning(line)
+            else:
+                logger.info(line)
+        except Exception:
+            return
+
+    def _ops(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if not self.ops_log:
+            return
+        try:
+            self.ops_log.append(event_type, payload)
+        except Exception:
+            return
+
+    def _is_admin_http(self, request: web.Request) -> bool:
+        token = request.cookies.get(TOKEN_COOKIE_NAME)
+        claims = _decode_token(token) if token else None
+        if not claims:
+            return False
+        username = str(claims.get("username") or "").lower()
+        return bool(username and username in self.admin_usernames)
 
     def _check_origin(self, request: web.Request) -> bool:
         # In dev, allow everything.
@@ -590,6 +628,9 @@ class RealtimeChatServer:
 
     async def _send(self, ws: web.WebSocketResponse, payload: Dict[str, Any]) -> None:
         try:
+            if payload.get("type") == "error":
+                self._metrics_counters["dawn_ws_errors_total"] += 1
+                self._recent_errors.append({"where": "ws", "error": payload.get("error"), "ts": time.time()})
             await ws.send_str(json.dumps(payload, ensure_ascii=False))
         except Exception:
             await self._disconnect(ws)
@@ -661,6 +702,24 @@ class RealtimeChatServer:
             info=self._metrics_info,
         )
         return web.Response(text=text, content_type="text/plain; version=0.0.4; charset=utf-8")
+
+    async def http_admin_health(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"ok": False, "error": "origin_not_allowed"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"ok": False, "error": "permission_denied"}, status=403)
+        self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
+        self._metrics_gauges["dawn_rooms"] = len(self._rooms)
+        self._metrics_gauges["dawn_agents"] = len(self.consciousnesses)
+        return _json_response(
+            {
+                "ok": True,
+                "ts": time.time(),
+                "gauges": dict(self._metrics_gauges),
+                "counters": dict(self._metrics_counters),
+                "recent_errors": list(self._recent_errors),
+            }
+        )
 
     def _check_auth_rate_limit(self, ip: str) -> bool:
         now = time.time()
@@ -874,6 +933,17 @@ class RealtimeChatServer:
             return
 
         msg_type = payload.get("type")
+        self._log_json(
+            "info",
+            {
+                "event": "ws_in",
+                "msg_type": msg_type,
+                "room": sess.room,
+                "sender_type": sess.sender_type,
+                "sender_id": sess.sender_id,
+            },
+        )
+        self._ops("ws_in", {"msg_type": msg_type, "room": sess.room, "sender_type": sess.sender_type, "sender_id": sess.sender_id})
         if msg_type == "chat":
             content = _truncate_message(str(payload.get("content", "")))
             room = _sanitize_room(payload.get("room") or sess.room)
@@ -900,6 +970,7 @@ class RealtimeChatServer:
                 return
             await self._create_tasks(room, sess, target, prompt)
             self._metrics_counters["dawn_tasks_created_total"] += 1
+            self._ops("create_task", {"room": room, "target": target, "by": sess.sender_id or f"guest:{sess.sender_name}"})
             # Nudge clients to refresh tasks.
             tasks = [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t]
             await self._broadcast(room, {"type": "tasks", "room": room, "tasks": tasks, "ts": time.time()})
@@ -941,6 +1012,7 @@ class RealtimeChatServer:
                 await self._send(ws, {"type": "error", "error": str(e)})
                 return
             self._metrics_counters["dawn_task_ratings_total"] += 1
+            self._ops("rate_task", {"task_id": task_id, "rating": rating, "by": sess.sender_id or f"guest:{sess.sender_name}"})
             await self._send(ws, {"type": "rated", "task_id": task_id, "rating": rating, "ts": time.time()})
             await self._system(t.room, f"Recorded rating for {task_id}: {rating}/5")
             return
@@ -1875,6 +1947,7 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
     app.router.add_get("/", server.http_index)
     app.router.add_get("/healthz", server.http_health)
     app.router.add_get("/metrics", server.http_metrics)
+    app.router.add_get("/admin/health", server.http_admin_health)
 
     app.router.add_post("/api/register", server.http_register)
     app.router.add_post("/api/login", server.http_login)
