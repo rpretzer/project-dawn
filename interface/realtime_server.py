@@ -60,6 +60,30 @@ JWT_SECRET = _jwt_secret()
 JWT_ALG = "HS256"
 
 
+def _prom_escape_label_value(v: str) -> str:
+    return (v or "").replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _format_prometheus_metrics(
+    *,
+    counters: Dict[str, int],
+    gauges: Dict[str, int],
+    info: Dict[str, str],
+) -> str:
+    lines: List[str] = []
+    if info:
+        labels = ",".join(f'{k}="{_prom_escape_label_value(v)}"' for k, v in sorted(info.items()))
+        lines.append("# TYPE dawn_info gauge")
+        lines.append(f"dawn_info{{{labels}}} 1")
+    for name, value in sorted(counters.items()):
+        lines.append(f"# TYPE {name} counter")
+        lines.append(f"{name} {int(value)}")
+    for name, value in sorted(gauges.items()):
+        lines.append(f"# TYPE {name} gauge")
+        lines.append(f"{name} {int(value)}")
+    return "\n".join(lines) + "\n"
+
+
 @dataclass
 class ClientSession:
     ws: web.WebSocketResponse
@@ -372,6 +396,13 @@ class RealtimeChatServer:
         self.git_diff_prefixes = _git_diff_prefixes()
         self.patch_apply_prefixes = _patch_apply_prefixes()
 
+        # Lightweight metrics (no external dependency)
+        self.metrics_enabled = os.getenv("DAWN_METRICS_ENABLED", "true" if ENV != "prod" else "false").lower() == "true"
+        self.metrics_token = (os.getenv("DAWN_METRICS_TOKEN") or "").strip()
+        self._metrics_counters: Dict[str, int] = defaultdict(int)
+        self._metrics_gauges: Dict[str, int] = defaultdict(int)
+        self._metrics_info: Dict[str, str] = {"env": ENV, "version": "dawn"}
+
         # Optional: automatic evolution loop (safe: uses experiments + rollback).
         self.auto_evolution_enabled = os.getenv("AUTO_EVOLUTION", "false").lower() == "true"
         self.auto_evolution_interval_s = float(os.getenv("AUTO_EVOLUTION_INTERVAL_SECONDS", "60"))
@@ -587,6 +618,7 @@ class RealtimeChatServer:
                 await ws.close()
         except Exception:
             pass
+        self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
 
     def _current_presence(self, room: str) -> List[Dict[str, Any]]:
         room = _sanitize_room(room)
@@ -609,6 +641,26 @@ class RealtimeChatServer:
 
     async def http_health(self, request: web.Request) -> web.Response:
         return _json_response({"ok": True, "ts": time.time()})
+
+    async def http_metrics(self, request: web.Request) -> web.Response:
+        if not self.metrics_enabled:
+            raise web.HTTPNotFound()
+        if ENV == "prod":
+            token = request.headers.get("X-Metrics-Token") or request.query.get("token")
+            if not self.metrics_token or token != self.metrics_token:
+                raise web.HTTPForbidden(text="metrics_forbidden")
+
+        # Gauges
+        self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
+        self._metrics_gauges["dawn_rooms"] = len(self._rooms)
+        self._metrics_gauges["dawn_agents"] = len(self.consciousnesses)
+
+        text = _format_prometheus_metrics(
+            counters=self._metrics_counters,
+            gauges=self._metrics_gauges,
+            info=self._metrics_info,
+        )
+        return web.Response(text=text, content_type="text/plain; version=0.0.4; charset=utf-8")
 
     def _check_auth_rate_limit(self, ip: str) -> bool:
         now = time.time()
@@ -724,10 +776,12 @@ class RealtimeChatServer:
     async def ws_handler(self, request: web.Request) -> web.StreamResponse:
         if not self._check_origin(request):
             raise web.HTTPForbidden(text="origin_not_allowed")
+        self._metrics_counters["dawn_ws_connections_total"] += 1
         ws = web.WebSocketResponse(heartbeat=20, receive_timeout=60)
         await ws.prepare(request)
 
         self._clients.add(ws)
+        self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
 
         # Identify user:
         # - Prefer HttpOnly cookie (safe for public deployments)
@@ -845,6 +899,7 @@ class RealtimeChatServer:
                 await self._send(ws, {"type": "error", "error": "rate_limited"})
                 return
             await self._create_tasks(room, sess, target, prompt)
+            self._metrics_counters["dawn_tasks_created_total"] += 1
             # Nudge clients to refresh tasks.
             tasks = [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t]
             await self._broadcast(room, {"type": "tasks", "room": room, "tasks": tasks, "ts": time.time()})
@@ -885,6 +940,7 @@ class RealtimeChatServer:
             except Exception as e:
                 await self._send(ws, {"type": "error", "error": str(e)})
                 return
+            self._metrics_counters["dawn_task_ratings_total"] += 1
             await self._send(ws, {"type": "rated", "task_id": task_id, "rating": rating, "ts": time.time()})
             await self._system(t.room, f"Recorded rating for {task_id}: {rating}/5")
             return
@@ -1039,6 +1095,7 @@ class RealtimeChatServer:
                         "ts": time.time(),
                     },
                 )
+                self._metrics_counters["dawn_patch_checks_total"] += 1
             except Exception as e:
                 await self._send(ws, {"type": "patch_check", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
             return
@@ -1085,6 +1142,7 @@ class RealtimeChatServer:
                         **stat,
                     },
                 )
+                self._metrics_counters["dawn_patch_stats_total"] += 1
             except Exception as e:
                 await self._send(ws, {"type": "patch_stat", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
             return
@@ -1147,6 +1205,7 @@ class RealtimeChatServer:
                 # If applied successfully, broadcast updated tasks list (and repo status stays manual).
                 if proc.returncode == 0:
                     await self._system(sess.room, f"Applied patch: {patch_path}")
+                self._metrics_counters["dawn_patch_applies_total"] += 1
             except Exception as e:
                 await self._send(ws, {"type": "patch_applied", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
             return
@@ -1209,6 +1268,7 @@ class RealtimeChatServer:
             content=content,
             created_at_ts=ts,
         )
+        self._metrics_counters["dawn_chat_messages_total"] += 1
         await self._broadcast(room, {"type": "message", "message": msg.to_dict()})
 
     async def _handle_command(self, sess: ClientSession, room: str, content: str) -> None:
@@ -1675,6 +1735,7 @@ class RealtimeChatServer:
             content=_truncate_message(text, limit=2000),
             created_at_ts=ts,
         )
+        self._metrics_counters["dawn_chat_messages_total"] += 1
         await self._broadcast(room, {"type": "message", "message": msg.to_dict()})
 
     async def _spawn_agent(self, room: str) -> None:
@@ -1813,6 +1874,7 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
 
     app.router.add_get("/", server.http_index)
     app.router.add_get("/healthz", server.http_health)
+    app.router.add_get("/metrics", server.http_metrics)
 
     app.router.add_post("/api/register", server.http_register)
     app.router.add_post("/api/login", server.http_login)
