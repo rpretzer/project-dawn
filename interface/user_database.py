@@ -5,9 +5,11 @@ Handles persistent user account storage and authentication
 
 import sqlite3
 import logging
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from pathlib import Path
 from datetime import datetime
+
+from core.db_migrations import ensure_schema
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class UserDatabase:
     def _init_database(self):
         """Initialize database schema"""
         with sqlite3.connect(self.db_path) as conn:
+            ensure_schema(conn, schema_name="user_database", target_version=1)
             # Users table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
@@ -217,4 +220,87 @@ class UserDatabase:
         except Exception as e:
             logger.error(f"Error deactivating user {user_id}: {e}")
             return False
+
+    def set_active(self, user_id: int, is_active: bool) -> bool:
+        """Set active flag for a user."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET is_active = ?
+                    WHERE id = ?
+                    """,
+                    (1 if is_active else 0, int(user_id)),
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Error setting is_active for user {user_id}: {e}")
+            return False
+
+    def get_user_by_username_any(self, username: str) -> Optional[Dict[str, Any]]:
+        """Get user by username, including inactive."""
+        try:
+            username = username.strip().lower()
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """
+                    SELECT id, username, password_hash, nickname, email,
+                           created_at, last_login, is_active
+                    FROM users
+                    WHERE username = ?
+                    """,
+                    (username,),
+                ).fetchone()
+                if not row:
+                    return None
+                return {
+                    "id": row["id"],
+                    "username": row["username"],
+                    "password_hash": row["password_hash"],
+                    "nickname": row["nickname"],
+                    "email": row["email"],
+                    "created_at": row["created_at"],
+                    "last_login": row["last_login"],
+                    "is_active": bool(row["is_active"]),
+                }
+        except Exception as e:
+            logger.error(f"Error getting user (any) {username}: {e}")
+            return None
+
+    def list_users(self, *, include_inactive: bool = False, limit: int = 200) -> List[Dict[str, Any]]:
+        """List users for admin UI."""
+        try:
+            lim = max(1, min(int(limit), 2000))
+        except Exception:
+            lim = 200
+        where = "" if include_inactive else "WHERE is_active = 1"
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"""
+                SELECT id, username, nickname, email, created_at, last_login, is_active
+                FROM users
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (lim,),
+            ).fetchall()
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                out.append(
+                    {
+                        "id": int(r["id"]),
+                        "username": str(r["username"]),
+                        "nickname": str(r["nickname"] or ""),
+                        "email": str(r["email"] or ""),
+                        "created_at": r["created_at"],
+                        "last_login": r["last_login"],
+                        "is_active": bool(r["is_active"]),
+                    }
+                )
+            return out
 

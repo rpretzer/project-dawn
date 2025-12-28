@@ -374,52 +374,12 @@ if __name__ == "__main__":
     ╚═══════════════════════════════════════╝
     """)
     
-    # Create example .env if not exists
-    env_path = Path('.env')
+    # Do not auto-generate .env (can accidentally create/overwrite config in prod).
+    # Prefer `.env.example` as a template.
+    env_path = Path(".env")
     if not env_path.exists():
-        with open(env_path, 'w') as f:
-            f.write("""# Project Dawn Configuration
-
-# LLM Provider (openai, anthropic, local)
-LLM_PROVIDER=openai
-
-# OpenAI Configuration
-OPENAI_API_KEY=your-openai-api-key
-OPENAI_MODEL=gpt-4-turbo-preview
-
-# Anthropic Configuration (alternative)
-# LLM_PROVIDER=anthropic
-# ANTHROPIC_API_KEY=your-anthropic-api-key
-# ANTHROPIC_MODEL=claude-3-opus-20240229
-
-# Local LLM (Ollama)
-# LLM_PROVIDER=local
-# LOCAL_MODEL=llama2
-# LOCAL_LLM_URL=http://localhost:11434
-
-# Blockchain Configuration
-ENABLE_BLOCKCHAIN=true
-BLOCKCHAIN_NETWORK=polygon-mumbai
-BLOCKCHAIN_PRIVATE_KEY=your-private-key
-MEMORY_CONTRACT_ADDRESS=
-
-# Revenue Platforms
-MEDIUM_API_KEY=your-medium-api-key
-SUBSTACK_API_KEY=your-substack-api-key
-GITHUB_TOKEN=your-github-token
-
-# P2P Network
-ENABLE_P2P=true
-BOOTSTRAP_NODES=
-
-# Features
-ENABLE_REVENUE=true
-
-# IPFS (optional)
-IPFS_API=/ip4/127.0.0.1/tcp/5001
-""")
-        print("📝 Created .env file. Please configure your API keys.")
-        sys.exit(1)
+        print("⚠️  No .env found. Proceeding with environment variables only.")
+        print("   Tip: copy .env.example to .env and configure secrets/keys.")
         
     # Run
     asyncio.run(main())

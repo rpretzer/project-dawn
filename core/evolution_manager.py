@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.agent_policy import AgentPolicy, PolicyStore
 from core.evolution_engine import EvolutionEngine, FitnessReport
 from core.task_manager import TaskStore
+from core.db_migrations import ensure_schema
 
 
 ExperimentStatus = str  # pending|accepted|rolled_back
@@ -76,6 +77,7 @@ class EvolutionManager:
 
     def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
+            ensure_schema(conn, schema_name="evolution_manager", target_version=1)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS evolution_experiments (

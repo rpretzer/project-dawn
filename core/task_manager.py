@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
+from core.db_migrations import ensure_schema
+
 logger = logging.getLogger(__name__)
 
 TaskStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -83,6 +85,7 @@ class TaskStore:
 
     def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
+            ensure_schema(conn, schema_name="task_store", target_version=1)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tasks (

@@ -5,6 +5,8 @@
 Project Dawn is a framework for running multiple LLM-backed **agents** with persistent memory and a real-time multi-user chat interface. It is designed for collaborative “ideas → tasks → delegated work → results” workflows (humans and agents together).
 
 See `ROADMAP.md` for planned feature work and milestones.
+See `DEPLOYMENT.md` for production deployment guidance.
+See `RUNBOOK.md` for operational procedures (rotation, backups, incidents).
 
 ## Features
 
@@ -91,6 +93,28 @@ python3 launch.py --count 1
 ```bash
 python3 launch.py --count 3 --realtime --port 8000
 ```
+
+### Docker (recommended for deployment)
+
+1. Copy config template:
+
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env`:
+- Set **`DAWN_ENV=prod`**
+- Set a strong **`JWT_SECRET`**
+- Set **`CHAT_ALLOWED_ORIGINS`** to your real origin(s)
+- Set `CHAT_ALLOW_GUESTS=false` for public deployments
+
+3. Run:
+
+```bash
+docker compose up --build
+```
+
+Then open `http://localhost:8000`.
 
 **Launch legacy dashboard (polling-based, kept for compatibility):**
 ```bash

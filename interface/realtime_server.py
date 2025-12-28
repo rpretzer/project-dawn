@@ -18,43 +18,126 @@ import logging
 import os
 import secrets
 import time
+import subprocess
+import ipaddress
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import deque, defaultdict
+from pathlib import Path
 
 import jwt
 from aiohttp import web, WSMsgType
 
 from .user_database import UserDatabase
+from .session_store import SessionStore, PasswordResetStore
 from .chat_store import ChatStore
 from .moderation_store import ModerationStore
 from core.orchestrator import AgentOrchestrator
-from core.task_manager import TaskStore
+from core.task_manager import TaskStore, Task
 from core.agent_policy import AgentPolicy
 from core.evolution_engine import EvolutionEngine
 from core.evolution_manager import EvolutionManager
+from core.git_tools import git_status as _git_status, git_diff as _git_diff
+from core.ops_log import OpsLogStore
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_ROOM = "lobby"
 TOKEN_COOKIE_NAME = os.getenv("CHAT_TOKEN_COOKIE", "dawn_token")
+CSRF_COOKIE_NAME = os.getenv("CHAT_CSRF_COOKIE", "dawn_csrf")
+REFRESH_COOKIE_NAME = os.getenv("CHAT_REFRESH_COOKIE", "dawn_refresh")
 ENV = (os.getenv("DAWN_ENV") or os.getenv("APP_ENV") or "dev").strip().lower()
 
-
-def _jwt_secret() -> str:
-    secret = os.getenv("JWT_SECRET")
-    if secret:
-        return secret
-    if ENV == "prod":
-        raise RuntimeError("JWT_SECRET must be set in production mode (DAWN_ENV=prod).")
-    # Dev fallback. For public deployments, JWT_SECRET should be set.
-    logger.warning("JWT_SECRET not set; using ephemeral secret (sessions will not survive restart).")
-    return secrets.token_urlsafe(48)
-
-
-JWT_SECRET = _jwt_secret()
 JWT_ALG = "HS256"
+
+
+def _jwt_secrets() -> List[str]:
+    """
+    Support safe JWT secret rotation.
+
+    - JWT_SECRET: current signing secret (required in prod)
+    - JWT_OLD_SECRETS: optional comma-separated list of previous secrets accepted for verification
+    """
+    current = (os.getenv("JWT_SECRET") or "").strip()
+    if not current:
+        if ENV == "prod":
+            raise RuntimeError("JWT_SECRET must be set in production mode (DAWN_ENV=prod).")
+        logger.warning("JWT_SECRET not set; using ephemeral secret (sessions will not survive restart).")
+        current = secrets.token_urlsafe(48)
+        return [current]
+    olds_raw = (os.getenv("JWT_OLD_SECRETS") or "").strip()
+    olds = [s.strip() for s in olds_raw.split(",") if s.strip()] if olds_raw else []
+    out: List[str] = []
+    for s in [current, *olds]:
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+JWT_SECRETS = _jwt_secrets()
+JWT_SECRET_CURRENT = JWT_SECRETS[0]
+
+
+def _jwt_access_ttl_seconds() -> int:
+    # Backward compatible: default to JWT_TTL_SECONDS if new var not set.
+    raw = (os.getenv("JWT_ACCESS_TTL_SECONDS") or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except Exception:
+            pass
+    return int(os.getenv("JWT_TTL_SECONDS", "86400"))
+
+
+def _jwt_refresh_ttl_seconds() -> int:
+    raw = (os.getenv("JWT_REFRESH_TTL_SECONDS") or "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except Exception:
+            pass
+    # 30 days default for refresh sessions
+    return int(os.getenv("JWT_REFRESH_TTL_SECONDS", str(30 * 24 * 3600)))
+
+
+def _session_token_secret() -> str:
+    # Optional dedicated secret for hashing refresh/reset tokens.
+    # If not set, reuse the current JWT secret.
+    return (os.getenv("SESSION_TOKEN_SECRET") or JWT_SECRET_CURRENT).strip()
+
+
+def _admin_action_token_required() -> bool:
+    default = "true" if ENV == "prod" else "false"
+    return (os.getenv("CHAT_REQUIRE_ADMIN_ACTION_TOKEN") or default).lower() == "true"
+
+
+def _admin_action_token_value() -> str:
+    return (os.getenv("CHAT_ADMIN_ACTION_TOKEN") or "").strip()
+
+
+def _prom_escape_label_value(v: str) -> str:
+    return (v or "").replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _format_prometheus_metrics(
+    *,
+    counters: Dict[str, int],
+    gauges: Dict[str, int],
+    info: Dict[str, str],
+) -> str:
+    lines: List[str] = []
+    if info:
+        labels = ",".join(f'{k}="{_prom_escape_label_value(v)}"' for k, v in sorted(info.items()))
+        lines.append("# TYPE dawn_info gauge")
+        lines.append(f"dawn_info{{{labels}}} 1")
+    for name, value in sorted(counters.items()):
+        lines.append(f"# TYPE {name} counter")
+        lines.append(f"{name} {int(value)}")
+    for name, value in sorted(gauges.items()):
+        lines.append(f"# TYPE {name} gauge")
+        lines.append(f"{name} {int(value)}")
+    return "\n".join(lines) + "\n"
 
 
 @dataclass
@@ -66,6 +149,7 @@ class ClientSession:
     sender_name: str  # nickname / guest name
     ip: str
     is_admin: bool = False
+    admin_action_ok: bool = False
 
 
 def _json_response(payload: Dict[str, Any], *, status: int = 200) -> web.Response:
@@ -74,19 +158,21 @@ def _json_response(payload: Dict[str, Any], *, status: int = 200) -> web.Respons
 
 def _issue_token(*, user_id: int, username: str, nickname: str) -> str:
     now = int(time.time())
-    exp = now + int(os.getenv("JWT_TTL_SECONDS", "86400"))  # 24h default
+    exp = now + int(_jwt_access_ttl_seconds())
     return jwt.encode(
         {"sub": str(user_id), "username": username, "nickname": nickname, "iat": now, "exp": exp},
-        JWT_SECRET,
+        JWT_SECRET_CURRENT,
         algorithm=JWT_ALG,
     )
 
 
 def _decode_token(token: str) -> Optional[Dict[str, Any]]:
-    try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-    except Exception:
-        return None
+    for secret in JWT_SECRETS:
+        try:
+            return jwt.decode(token, secret, algorithms=[JWT_ALG])
+        except Exception:
+            continue
+    return None
 
 
 def _allowed_origins() -> Optional[Set[str]]:
@@ -94,6 +180,36 @@ def _allowed_origins() -> Optional[Set[str]]:
     if not raw:
         return None
     return {o.strip() for o in raw.split(",") if o.strip()}
+
+def _csrf_required() -> bool:
+    """
+    Require CSRF for browser POSTs in prod by default.
+    """
+    default = "true" if ENV == "prod" else "false"
+    return (os.getenv("CHAT_REQUIRE_CSRF") or default).lower() == "true"
+
+
+def _fetch_metadata_blocks_cross_site(headers: Dict[str, str]) -> bool:
+    """
+    Best-effort CSRF hardening using Fetch Metadata.
+    If browser reports a cross-site request, block it in prod.
+    """
+    if ENV != "prod":
+        return False
+    site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    # "none" can appear for top-level navigations or some non-browser clients.
+    return site == "cross-site"
+
+
+def _issue_csrf_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _constant_time_equal(a: str, b: str) -> bool:
+    try:
+        return secrets.compare_digest(str(a or ""), str(b or ""))
+    except Exception:
+        return False
 
 
 def _sanitize_room(room: Optional[str]) -> str:
@@ -112,6 +228,199 @@ def _truncate_message(text: str, limit: int = 4000) -> str:
     return text
 
 
+def _rate_allow(q: deque, *, now: float, window_seconds: float, limit: int) -> bool:
+    """
+    Sliding-window rate limiter helper (mutates q).
+    """
+    window_seconds = float(window_seconds)
+    limit = int(limit)
+    while q and q[0] < now - window_seconds:
+        q.popleft()
+    if len(q) >= limit:
+        return False
+    q.append(now)
+    return True
+
+
+def _task_public(t: Task) -> Dict[str, Any]:
+    """
+    Public-safe task shape for the web UI.
+    Avoids leaking full prompts by default.
+    """
+    return {
+        "id": t.id,
+        "room": t.room,
+        "created_by": t.created_by,
+        "requested_by_name": t.requested_by_name,
+        "assigned_to": t.assigned_to,
+        "title": t.title,
+        "status": t.status,
+        "result": (t.result[:3000] if t.result else None),
+        "error": (t.error[:1000] if t.error else None),
+        "created_at_ts": t.created_at_ts,
+        "updated_at_ts": t.updated_at_ts,
+    }
+
+
+def _file_read_prefixes() -> List[str]:
+    """
+    Comma-separated allowed prefixes (workspace-relative) for file reads from the UI.
+    Default: artifacts/ only (prevents leaking .env, keys, etc.).
+    """
+    raw = (os.getenv("CHAT_FILE_READ_PREFIXES") or "artifacts/").strip()
+    prefs = []
+    for p in raw.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("/"):
+            p = p.lstrip("/")
+        if not p.endswith("/"):
+            p = p + "/"
+        prefs.append(p)
+    return prefs or ["artifacts/"]
+
+
+def _git_diff_prefixes() -> List[str]:
+    """
+    Allowed path prefixes for git diff requests via the UI.
+    Default: artifacts/ only (prevents leaking code/secrets to non-admins; even admin
+    should intentionally scope diffs).
+    """
+    raw = (os.getenv("CHAT_GIT_DIFF_PREFIXES") or "artifacts/").strip()
+    prefs = []
+    for p in raw.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("/"):
+            p = p.lstrip("/")
+        # Allow exact files too (no trailing slash required), but normalize below.
+        prefs.append(p)
+    return prefs or ["artifacts/"]
+
+def _patch_apply_prefixes() -> List[str]:
+    """
+    Allowed prefixes for patch artifacts that can be applied via the UI.
+    Default: artifacts/ only.
+    """
+    raw = (os.getenv("CHAT_PATCH_APPLY_PREFIXES") or "artifacts/").strip()
+    prefs = []
+    for p in raw.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("/"):
+            p = p.lstrip("/")
+        if not p.endswith("/"):
+            p = p + "/"
+        prefs.append(p)
+    return prefs or ["artifacts/"]
+
+
+def _normalize_rel_path(path: str) -> str:
+    p = (path or "").strip().replace("\\", "/")
+    if p.startswith("/"):
+        p = p.lstrip("/")
+    # Remove redundant leading ./ segments.
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def _resolve_under_root(root: Path, rel_path: str) -> Path:
+    rel = _normalize_rel_path(rel_path)
+    if not rel:
+        raise ValueError("path_required")
+    cand = (root / rel).resolve()
+    if root not in cand.parents and cand != root:
+        raise ValueError("path_outside_workspace")
+    return cand
+
+
+def _is_allowed_read_path(rel_path: str, prefixes: List[str]) -> bool:
+    rel = _normalize_rel_path(rel_path)
+    for pref in prefixes:
+        pref_n = _normalize_rel_path(pref)
+        # If prefix ends with "/", treat as directory prefix; else treat as either exact file match or dir prefix.
+        if pref_n.endswith("/"):
+            if rel.startswith(pref_n):
+                return True
+        else:
+            if rel == pref_n or rel.startswith(pref_n.rstrip("/") + "/"):
+                return True
+    return False
+
+
+def _is_allowed_git_path(rel_path: str, prefixes: List[str]) -> bool:
+    # Same semantics as file read allowlist, but separate env/config.
+    return _is_allowed_read_path(rel_path, prefixes)
+
+def _list_files_under(root: Path, rel_dir: str, *, limit: int = 200) -> List[str]:
+    limit = max(1, min(int(limit), 500))
+    d = _resolve_under_root(root, rel_dir)
+    if not d.exists() or not d.is_dir():
+        return []
+    out: List[str] = []
+    for p in d.rglob("*"):
+        try:
+            if p.is_dir():
+                continue
+            rp = p.resolve()
+            if root not in rp.parents and rp != root:
+                continue
+            out.append(str(rp.relative_to(root)))
+            if len(out) >= limit:
+                break
+        except Exception:
+            continue
+    return sorted(out)[:limit]
+
+
+def _read_text_file(root: Path, rel_path: str, *, max_bytes: int = 100_000) -> Dict[str, Any]:
+    max_bytes = max(1000, min(int(max_bytes), 500_000))
+    p = _resolve_under_root(root, rel_path)
+    if not p.exists() or not p.is_file():
+        return {"ok": False, "error": "not_found"}
+    data = p.read_bytes()
+    truncated = False
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+        truncated = True
+    text = data.decode("utf-8", errors="replace")
+    return {"ok": True, "path": str(p.relative_to(root)), "content": text, "truncated": truncated}
+
+def _is_patch_artifact_path(path: str) -> bool:
+    p = _normalize_rel_path(path)
+    return bool(p) and p.endswith(".patch")
+
+
+def _git_apply_stat(*, repo_root: Path, patch_text: str) -> Dict[str, Any]:
+    """
+    Return a `git apply --stat` preview (no changes made).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "apply", "--stat", "--whitespace=nowarn"],
+            cwd=str(repo_root),
+            input=(patch_text or "").encode("utf-8"),
+            capture_output=True,
+            timeout=8.0,
+            check=False,
+        )
+        out = (proc.stdout or b"").decode("utf-8", errors="replace")
+        err = (proc.stderr or b"").decode("utf-8", errors="replace")
+        return {
+            "ok": proc.returncode == 0,
+            "exit_code": int(proc.returncode),
+            "stdout": out[:20000],
+            "stderr": err[:20000],
+            "truncated": (len(out) > 20000 or len(err) > 20000),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _is_command(text: str) -> bool:
     return text.strip().startswith("/")
 
@@ -122,9 +431,16 @@ class RealtimeChatServer:
         self.swarm = swarm
 
         self.user_db = UserDatabase()
+        self.session_store = SessionStore(Path(os.getenv("DAWN_AUTH_DB", "data/users.db")), token_secret=_session_token_secret())
+        self.password_reset_store = PasswordResetStore(Path(os.getenv("DAWN_AUTH_DB", "data/users.db")), token_secret=_session_token_secret())
         self.chat_store = ChatStore()
         self.task_store = TaskStore()
-        self.orchestrator = AgentOrchestrator(agents=self.consciousnesses, swarm=self.swarm, task_store=self.task_store)
+        self.orchestrator = AgentOrchestrator(
+            agents=self.consciousnesses,
+            swarm=self.swarm,
+            task_store=self.task_store,
+            workspace_root=Path(os.getenv("DAWN_WORKSPACE_ROOT", "/workspace")),
+        )
         self.moderation = ModerationStore()
         self.evolution = EvolutionEngine(task_store=self.task_store, policy_store=self.orchestrator.policy_store)
         self.evolution_manager = EvolutionManager(
@@ -152,14 +468,60 @@ class RealtimeChatServer:
         self.max_auth_per_minute = int(os.getenv("CHAT_MAX_AUTH_PER_MINUTE", "10"))
         self._auth_rate: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))  # ip -> timestamps
 
+        # WS action rate limits (task creation + ratings bypass chat limiter, so limit separately)
+        self.max_tasks_per_minute_human = int(os.getenv("CHAT_MAX_TASKS_PER_MINUTE_HUMAN", "8"))
+        self.max_tasks_per_minute_guest = int(os.getenv("CHAT_MAX_TASKS_PER_MINUTE_GUEST", "2"))
+        self.max_ratings_per_minute = int(os.getenv("CHAT_MAX_RATINGS_PER_MINUTE", "20"))
+        self._action_rate: Dict[str, deque] = defaultdict(lambda: deque(maxlen=128))  # key:action -> timestamps
+
         # Policy defaults
         self.allow_guests_default = os.getenv("CHAT_ALLOW_GUESTS", "true" if ENV != "prod" else "false").lower() == "true"
         self.admin_usernames = {u.strip().lower() for u in (os.getenv("CHAT_ADMIN_USERNAMES") or "").split(",") if u.strip()}
+        self.require_admin_action_token = _admin_action_token_required()
+        self.admin_action_token = _admin_action_token_value()
+        if ENV == "prod" and self.require_admin_action_token and not self.admin_action_token:
+            raise RuntimeError("CHAT_ADMIN_ACTION_TOKEN must be set when CHAT_REQUIRE_ADMIN_ACTION_TOKEN=true in prod")
+        self.admin_allowed_nets = self._parse_admin_allowed_ips(os.getenv("CHAT_ADMIN_ALLOWED_IPS") or "")
+        self.admin_require_mtls = (os.getenv("CHAT_ADMIN_REQUIRE_MTLS") or "false").lower() == "true"
+        self.mtls_verify_header = (os.getenv("CHAT_MTLS_VERIFY_HEADER") or "X-Client-Verify").strip()
+        self.mtls_verify_value = (os.getenv("CHAT_MTLS_VERIFY_VALUE") or "SUCCESS").strip()
 
         # Start orchestrator workers and wire event sink to broadcast to rooms
         self._bg_tasks.append(asyncio.create_task(self.orchestrator.start()))
         self.orchestrator.set_event_sink(self._orchestrator_event_sink)
         self._origins = _allowed_origins()
+        self.workspace_root = Path(os.getenv("DAWN_WORKSPACE_ROOT", "/workspace")).resolve()
+        self.file_read_prefixes = _file_read_prefixes()
+        self.git_diff_prefixes = _git_diff_prefixes()
+        self.patch_apply_prefixes = _patch_apply_prefixes()
+
+        # Lightweight metrics (no external dependency)
+        self.metrics_enabled = os.getenv("DAWN_METRICS_ENABLED", "true" if ENV != "prod" else "false").lower() == "true"
+        self.metrics_token = (os.getenv("DAWN_METRICS_TOKEN") or "").strip()
+        self._metrics_counters: Dict[str, int] = defaultdict(int)
+        self._metrics_gauges: Dict[str, int] = defaultdict(int)
+        self._metrics_info: Dict[str, str] = {"env": ENV, "version": "dawn"}
+
+        # Structured ops log (optional)
+        self.ops_log_enabled = os.getenv("DAWN_OPS_LOG_ENABLED", "true" if ENV == "prod" else "false").lower() == "true"
+        try:
+            retention_days = int(os.getenv("DAWN_OPS_RETENTION_DAYS", "14"))
+        except Exception:
+            retention_days = 14
+        try:
+            max_events = int(os.getenv("DAWN_OPS_MAX_EVENTS", "5000"))
+        except Exception:
+            max_events = 5000
+        self.ops_log = (
+            OpsLogStore(
+                Path(os.getenv("DAWN_OPS_DB", "data/ops.db")),
+                retention_days=retention_days,
+                max_events=max_events,
+            )
+            if self.ops_log_enabled
+            else None
+        )
+        self._recent_errors: deque = deque(maxlen=50)
 
         # Optional: automatic evolution loop (safe: uses experiments + rollback).
         self.auto_evolution_enabled = os.getenv("AUTO_EVOLUTION", "false").lower() == "true"
@@ -170,6 +532,79 @@ class RealtimeChatServer:
         if self.auto_evolution_enabled:
             self._bg_tasks.append(asyncio.create_task(self._auto_evolution_loop()))
 
+    def _log_json(self, level: str, payload: Dict[str, Any]) -> None:
+        record = {"ts": time.time(), **(payload or {})}
+        try:
+            line = json.dumps(record, ensure_ascii=False)
+        except Exception:
+            return
+        try:
+            if level == "error":
+                logger.error(line)
+            elif level == "warning":
+                logger.warning(line)
+            else:
+                logger.info(line)
+        except Exception:
+            return
+
+    def _ops(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if not self.ops_log:
+            return
+        try:
+            self.ops_log.append(event_type, payload)
+        except Exception:
+            return
+
+    def _is_admin_http(self, request: web.Request) -> bool:
+        token = request.cookies.get(TOKEN_COOKIE_NAME)
+        claims = _decode_token(token) if token else None
+        if not claims:
+            return False
+        username = str(claims.get("username") or "").lower()
+        return bool(username and username in self.admin_usernames)
+
+    def _parse_admin_allowed_ips(self, raw: str) -> List[ipaddress._BaseNetwork]:
+        nets: List[ipaddress._BaseNetwork] = []
+        for part in (raw or "").split(","):
+            s = part.strip()
+            if not s:
+                continue
+            try:
+                if "/" in s:
+                    nets.append(ipaddress.ip_network(s, strict=False))
+                else:
+                    # single host
+                    ip = ipaddress.ip_address(s)
+                    if ip.version == 4:
+                        nets.append(ipaddress.ip_network(f"{s}/32", strict=False))
+                    else:
+                        nets.append(ipaddress.ip_network(f"{s}/128", strict=False))
+            except Exception:
+                continue
+        return nets
+
+    def _admin_ip_allowed(self, request: web.Request) -> bool:
+        if not self.admin_allowed_nets:
+            return True
+        ip = request.remote or ""
+        try:
+            addr = ipaddress.ip_address(ip)
+        except Exception:
+            return False
+        return any(addr in net for net in self.admin_allowed_nets)
+
+    def _admin_mtls_ok(self, request: web.Request) -> bool:
+        if not self.admin_require_mtls:
+            return True
+        val = (request.headers.get(self.mtls_verify_header) or "").strip()
+        return val == self.mtls_verify_value
+
+    def _check_admin_action_token(self, token: Optional[str]) -> bool:
+        if not self.require_admin_action_token:
+            return True
+        return _constant_time_equal(str(token or ""), self.admin_action_token)
+
     def _check_origin(self, request: web.Request) -> bool:
         # In dev, allow everything.
         if ENV != "prod":
@@ -177,13 +612,21 @@ class RealtimeChatServer:
         origin = request.headers.get("Origin")
         if not origin:
             return True  # non-browser clients
+
+        # In prod, you generally want an explicit allowlist for browser Origins.
+        require_allowlist = (os.getenv("CHAT_REQUIRE_ORIGIN_ALLOWLIST") or "true").lower() == "true"
         if not self._origins:
-            return True  # no allowlist configured
+            return not require_allowlist
         return origin in self._origins
 
     def _set_auth_cookie(self, resp: web.Response, token: str, request: web.Request) -> None:
-        ttl = int(os.getenv("JWT_TTL_SECONDS", "86400"))
+        ttl = int(_jwt_access_ttl_seconds())
         secure = (ENV == "prod") or (request.scheme == "https")
+        samesite = (os.getenv("CHAT_COOKIE_SAMESITE") or ("Strict" if ENV == "prod" else "Lax")).strip()
+        if samesite.lower() in ("strict", "lax", "none"):
+            samesite = samesite.title()
+        else:
+            samesite = "Lax"
         # HttpOnly cookie so it is not accessible to JS; websocket can still send it.
         resp.set_cookie(
             TOKEN_COOKIE_NAME,
@@ -191,9 +634,65 @@ class RealtimeChatServer:
             max_age=ttl,
             httponly=True,
             secure=secure,
-            samesite="Lax",
+            samesite=samesite,
             path="/",
         )
+
+    def _set_csrf_cookie(self, resp: web.Response, token: str, request: web.Request) -> None:
+        ttl = int(_jwt_access_ttl_seconds())
+        secure = (ENV == "prod") or (request.scheme == "https")
+        samesite = (os.getenv("CHAT_COOKIE_SAMESITE") or ("Strict" if ENV == "prod" else "Lax")).strip()
+        if samesite.lower() in ("strict", "lax", "none"):
+            samesite = samesite.title()
+        else:
+            samesite = "Lax"
+        resp.set_cookie(
+            CSRF_COOKIE_NAME,
+            token,
+            max_age=ttl,
+            httponly=False,
+            secure=secure,
+            samesite=samesite,
+            path="/",
+        )
+
+    def _set_refresh_cookie(self, resp: web.Response, refresh_token: str, request: web.Request) -> None:
+        ttl = int(_jwt_refresh_ttl_seconds())
+        secure = (ENV == "prod") or (request.scheme == "https")
+        samesite = (os.getenv("CHAT_COOKIE_SAMESITE") or ("Strict" if ENV == "prod" else "Lax")).strip()
+        if samesite.lower() in ("strict", "lax", "none"):
+            samesite = samesite.title()
+        else:
+            samesite = "Lax"
+        resp.set_cookie(
+            REFRESH_COOKIE_NAME,
+            refresh_token,
+            max_age=ttl,
+            httponly=True,
+            secure=secure,
+            samesite=samesite,
+            path="/",
+        )
+
+    def _require_csrf(self, request: web.Request) -> bool:
+        """
+        Require CSRF token when request is from a browser (has Origin).
+        Non-browser clients typically omit Origin and are not subject to CSRF.
+        """
+        if not _csrf_required():
+            return False
+        origin = request.headers.get("Origin")
+        return bool(origin)
+
+    def _check_csrf(self, request: web.Request) -> bool:
+        """
+        Double-submit: require X-CSRF-Token header matches CSRF cookie.
+        """
+        if not self._require_csrf(request):
+            return True
+        cookie = request.cookies.get(CSRF_COOKIE_NAME) or ""
+        header = request.headers.get("X-CSRF-Token") or ""
+        return bool(cookie and header and _constant_time_equal(cookie, header))
 
     async def _orchestrator_event_sink(self, event: Dict[str, Any]) -> None:
         """
@@ -209,6 +708,9 @@ class RealtimeChatServer:
                 task = event.get("task") or {}
                 room = str(task.get("room") or DEFAULT_ROOM)
                 task_id = str(task.get("id") or "")
+                t = self.task_store.get_task(task_id) if task_id else None
+                if t:
+                    await self._broadcast(room, {"type": "task", "event": "started", "task": _task_public(t), "ts": time.time()})
                 status = str(task.get("status") or ev)
                 assigned_to = str(task.get("assigned_to") or "")
                 title = str(task.get("title") or "")
@@ -218,6 +720,9 @@ class RealtimeChatServer:
                 task = event.get("task") or {}
                 room = str(task.get("room") or DEFAULT_ROOM)
                 task_id = str(task.get("id") or "")
+                t = self.task_store.get_task(task_id) if task_id else None
+                if t:
+                    await self._broadcast(room, {"type": "task", "event": "completed", "task": _task_public(t), "ts": time.time()})
                 assigned_to = str(task.get("assigned_to") or "")
                 title = str(task.get("title") or "")
                 result = str(task.get("result") or "").strip()
@@ -239,6 +744,9 @@ class RealtimeChatServer:
                 task = event.get("task") or {}
                 room = str(task.get("room") or DEFAULT_ROOM)
                 task_id = str(task.get("id") or "")
+                t = self.task_store.get_task(task_id) if task_id else None
+                if t:
+                    await self._broadcast(room, {"type": "task", "event": "failed", "task": _task_public(t), "ts": time.time()})
                 assigned_to = str(task.get("assigned_to") or "")
                 title = str(task.get("title") or "")
                 err = str(task.get("error") or "failed")
@@ -250,6 +758,7 @@ class RealtimeChatServer:
                 do = str(event.get("do") or "")
                 task = self.task_store.get_task(task_id) if task_id else None
                 room = task.room if task else DEFAULT_ROOM
+                await self._broadcast(room, {"type": "task", "event": "progress", "task_id": task_id, "step": step, "do": do, "ts": time.time()})
                 await self._system(room, f"[task {task_id}] step {step}: {do}")
                 return
             if ev == "tool":
@@ -257,6 +766,7 @@ class RealtimeChatServer:
                 name = str(event.get("name") or "")
                 task = self.task_store.get_task(task_id) if task_id else None
                 room = task.room if task else DEFAULT_ROOM
+                await self._broadcast(room, {"type": "task", "event": "tool", "task_id": task_id, "name": name, "ts": time.time()})
                 await self._system(room, f"[task {task_id}] tool: {name}")
                 return
         except Exception:
@@ -329,6 +839,9 @@ class RealtimeChatServer:
 
     async def _send(self, ws: web.WebSocketResponse, payload: Dict[str, Any]) -> None:
         try:
+            if payload.get("type") == "error":
+                self._metrics_counters["dawn_ws_errors_total"] += 1
+                self._recent_errors.append({"where": "ws", "error": payload.get("error"), "ts": time.time()})
             await ws.send_str(json.dumps(payload, ensure_ascii=False))
         except Exception:
             await self._disconnect(ws)
@@ -357,6 +870,7 @@ class RealtimeChatServer:
                 await ws.close()
         except Exception:
             pass
+        self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
 
     def _current_presence(self, room: str) -> List[Dict[str, Any]]:
         room = _sanitize_room(room)
@@ -380,19 +894,199 @@ class RealtimeChatServer:
     async def http_health(self, request: web.Request) -> web.Response:
         return _json_response({"ok": True, "ts": time.time()})
 
+    async def http_csrf(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        token = _issue_csrf_token()
+        resp = _json_response({"success": True, "csrf_token": token})
+        self._set_csrf_cookie(resp, token, request)
+        return resp
+
+    async def http_metrics(self, request: web.Request) -> web.Response:
+        if not self.metrics_enabled:
+            raise web.HTTPNotFound()
+        if ENV == "prod":
+            token = request.headers.get("X-Metrics-Token") or request.query.get("token")
+            if not self.metrics_token or token != self.metrics_token:
+                raise web.HTTPForbidden(text="metrics_forbidden")
+
+        # Gauges
+        self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
+        self._metrics_gauges["dawn_rooms"] = len(self._rooms)
+        self._metrics_gauges["dawn_agents"] = len(self.consciousnesses)
+
+        text = _format_prometheus_metrics(
+            counters=self._metrics_counters,
+            gauges=self._metrics_gauges,
+            info=self._metrics_info,
+        )
+        return web.Response(text=text, content_type="text/plain; version=0.0.4; charset=utf-8")
+
+    async def http_admin_health(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"ok": False, "error": "origin_not_allowed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"ok": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"ok": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"ok": False, "error": "permission_denied"}, status=403)
+        self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
+        self._metrics_gauges["dawn_rooms"] = len(self._rooms)
+        self._metrics_gauges["dawn_agents"] = len(self.consciousnesses)
+        return _json_response(
+            {
+                "ok": True,
+                "ts": time.time(),
+                "gauges": dict(self._metrics_gauges),
+                "counters": dict(self._metrics_counters),
+                "recent_errors": list(self._recent_errors),
+            }
+        )
+
+    async def http_admin_users_list(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        include_inactive = (request.query.get("include_inactive") or "false").lower() == "true"
+        users = self.user_db.list_users(include_inactive=include_inactive, limit=int(request.query.get("limit") or "200"))
+        return _json_response({"success": True, "users": users})
+
+    async def http_admin_user_deactivate(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        if not self._check_admin_action_token(request.headers.get("X-Admin-Action-Token")):
+            return _json_response({"success": False, "error": "admin_action_token_required"}, status=403)
+        username = (request.match_info.get("username") or "").strip()
+        user = self.user_db.get_user_by_username_any(username)
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=404)
+        ok = self.user_db.set_active(int(user["id"]), False)
+        if ok:
+            try:
+                self.session_store.revoke_user_sessions(int(user["id"]))
+            except Exception:
+                pass
+            self._ops("admin_user_deactivate", {"user_id": str(user["id"]), "username": str(user["username"])})
+        return _json_response({"success": bool(ok)})
+
+    async def http_admin_user_reactivate(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        if not self._check_admin_action_token(request.headers.get("X-Admin-Action-Token")):
+            return _json_response({"success": False, "error": "admin_action_token_required"}, status=403)
+        username = (request.match_info.get("username") or "").strip()
+        user = self.user_db.get_user_by_username_any(username)
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=404)
+        ok = self.user_db.set_active(int(user["id"]), True)
+        if ok:
+            self._ops("admin_user_reactivate", {"user_id": str(user["id"]), "username": str(user["username"])})
+        return _json_response({"success": bool(ok)})
+
+    async def http_admin_user_set_password(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        if not self._check_admin_action_token(request.headers.get("X-Admin-Action-Token")):
+            return _json_response({"success": False, "error": "admin_action_token_required"}, status=403)
+        username = (request.match_info.get("username") or "").strip()
+        user = self.user_db.get_user_by_username_any(username)
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=404)
+        try:
+            data = await request.json()
+        except Exception:
+            return _json_response({"success": False, "error": "invalid_json"}, status=400)
+        new_password = (data.get("new_password") or "").strip()
+        if len(new_password) < 8:
+            return _json_response({"success": False, "error": "password_too_short"}, status=400)
+        import bcrypt
+
+        password_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        ok = self.user_db.update_password(int(user["id"]), password_hash)
+        if ok:
+            try:
+                self.session_store.revoke_user_sessions(int(user["id"]))
+            except Exception:
+                pass
+            self._ops("admin_user_set_password", {"user_id": str(user["id"]), "username": str(user["username"])})
+        return _json_response({"success": bool(ok)})
+
+    async def http_admin_user_revoke_sessions(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        if not self._admin_ip_allowed(request):
+            return _json_response({"success": False, "error": "admin_ip_not_allowed"}, status=403)
+        if not self._admin_mtls_ok(request):
+            return _json_response({"success": False, "error": "admin_mtls_required"}, status=403)
+        if not self._is_admin_http(request):
+            return _json_response({"success": False, "error": "permission_denied"}, status=403)
+        if not self._check_admin_action_token(request.headers.get("X-Admin-Action-Token")):
+            return _json_response({"success": False, "error": "admin_action_token_required"}, status=403)
+        username = (request.match_info.get("username") or "").strip()
+        user = self.user_db.get_user_by_username_any(username)
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=404)
+        n = int(self.session_store.revoke_user_sessions(int(user["id"])))
+        self._ops("admin_user_revoke_sessions", {"user_id": str(user["id"]), "username": str(user["username"]), "count": n})
+        return _json_response({"success": True, "revoked": n})
+
     def _check_auth_rate_limit(self, ip: str) -> bool:
         now = time.time()
         q = self._auth_rate[ip]
-        while q and q[0] < now - 60:
-            q.popleft()
-        if len(q) >= self.max_auth_per_minute:
-            return False
-        q.append(now)
-        return True
+        return _rate_allow(q, now=now, window_seconds=60.0, limit=self.max_auth_per_minute)
+
+    def _rate_limit_key(self, sess: ClientSession) -> str:
+        return sess.sender_id if sess.sender_id else f"guest:{sess.sender_name}"
 
     async def http_register(self, request: web.Request) -> web.Response:
         if not self._check_origin(request):
             return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
         ip = request.remote or "unknown"
         if not self._check_auth_rate_limit(ip):
             return _json_response({"success": False, "error": "rate_limited"}, status=429)
@@ -425,13 +1119,26 @@ class RealtimeChatServer:
             return _json_response({"success": False, "error": err or "registration_failed"}, status=400)
 
         token = _issue_token(user_id=user_id, username=username.strip().lower(), nickname=nickname)
+        ip = request.remote or "unknown"
+        ua = request.headers.get("User-Agent")
+        _, refresh_token = self.session_store.create_session(
+            user_id=int(user_id),
+            ip=ip,
+            user_agent=ua,
+            ttl_seconds=int(_jwt_refresh_ttl_seconds()),
+        )
         resp = _json_response({"success": True, "token": token, "user": {"id": user_id, "username": username, "nickname": nickname}})
         self._set_auth_cookie(resp, token, request)
+        self._set_refresh_cookie(resp, refresh_token, request)
         return resp
 
     async def http_login(self, request: web.Request) -> web.Response:
         if not self._check_origin(request):
             return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
         ip = request.remote or "unknown"
         if not self._check_auth_rate_limit(ip):
             return _json_response({"success": False, "error": "rate_limited"}, status=429)
@@ -463,13 +1170,34 @@ class RealtimeChatServer:
         token = _issue_token(user_id=int(user["id"]), username=user["username"], nickname=nickname)
         resp = _json_response({"success": True, "token": token, "user": {"id": user["id"], "username": user["username"], "nickname": nickname}})
         self._set_auth_cookie(resp, token, request)
+        ip = request.remote or "unknown"
+        ua = request.headers.get("User-Agent")
+        _, refresh_token = self.session_store.create_session(
+            user_id=int(user["id"]),
+            ip=ip,
+            user_agent=ua,
+            ttl_seconds=int(_jwt_refresh_ttl_seconds()),
+        )
+        self._set_refresh_cookie(resp, refresh_token, request)
         return resp
 
     async def http_logout(self, request: web.Request) -> web.Response:
         if not self._check_origin(request):
             return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        try:
+            rt = request.cookies.get(REFRESH_COOKIE_NAME)
+            if rt:
+                self.session_store.revoke_token(rt)
+        except Exception:
+            pass
         resp = _json_response({"success": True})
         resp.del_cookie(TOKEN_COOKIE_NAME, path="/")
+        resp.del_cookie(REFRESH_COOKIE_NAME, path="/")
+        resp.del_cookie(CSRF_COOKIE_NAME, path="/")
         return resp
 
     async def http_me(self, request: web.Request) -> web.Response:
@@ -493,13 +1221,115 @@ class RealtimeChatServer:
             }
         )
 
+    async def http_refresh(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        rt = request.cookies.get(REFRESH_COOKIE_NAME)
+        if not rt:
+            return _json_response({"success": False, "error": "no_refresh_token"}, status=401)
+        ip = request.remote or "unknown"
+        ua = request.headers.get("User-Agent")
+        rotated = self.session_store.rotate(
+            refresh_token=rt,
+            ip=ip,
+            user_agent=ua,
+            ttl_seconds=int(_jwt_refresh_ttl_seconds()),
+        )
+        if not rotated:
+            return _json_response({"success": False, "error": "invalid_refresh_token"}, status=401)
+        user_id, _, new_rt = rotated
+        user = self.user_db.get_user_by_id(int(user_id))
+        if not user:
+            return _json_response({"success": False, "error": "user_not_found"}, status=401)
+        nickname = user.get("nickname") or user["username"]
+        token = _issue_token(user_id=int(user["id"]), username=user["username"], nickname=nickname)
+        resp = _json_response({"success": True, "token": token})
+        self._set_auth_cookie(resp, token, request)
+        self._set_refresh_cookie(resp, new_rt, request)
+        return resp
+
+    async def http_password_reset_request(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        try:
+            data = await request.json()
+        except Exception:
+            return _json_response({"success": False, "error": "invalid_json"}, status=400)
+        username = (data.get("username") or "").strip()
+        ip = request.remote or "unknown"
+        user = self.user_db.get_user_by_username(username)
+        # Do not leak whether user exists.
+        reset_token: Optional[str] = None
+        if user:
+            try:
+                _, reset_token = self.password_reset_store.issue(
+                    user_id=int(user["id"]),
+                    ttl_seconds=int(os.getenv("PASSWORD_RESET_TTL_SECONDS", "3600")),
+                    requested_ip=ip,
+                )
+                self._ops("password_reset_issued", {"user_id": str(user["id"]), "ip": ip})
+            except Exception:
+                pass
+        payload: Dict[str, Any] = {"success": True}
+        # Dev convenience: return token unless explicitly disabled.
+        if reset_token and (ENV != "prod") and (os.getenv("DAWN_RETURN_RESET_TOKEN", "true").lower() == "true"):
+            payload["reset_token"] = reset_token
+        return _json_response(payload)
+
+    async def http_password_reset_confirm(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            return _json_response({"success": False, "error": "cross_site_blocked"}, status=403)
+        if not self._check_csrf(request):
+            return _json_response({"success": False, "error": "csrf_failed"}, status=403)
+        try:
+            data = await request.json()
+        except Exception:
+            return _json_response({"success": False, "error": "invalid_json"}, status=400)
+        token = (data.get("reset_token") or "").strip()
+        new_password = (data.get("new_password") or "").strip()
+        if not token or not new_password:
+            return _json_response({"success": False, "error": "token_and_new_password_required"}, status=400)
+        if len(new_password) < 8:
+            return _json_response({"success": False, "error": "password_too_short"}, status=400)
+        user_id = self.password_reset_store.consume(token=token)
+        if not user_id:
+            return _json_response({"success": False, "error": "invalid_or_expired_token"}, status=400)
+        # Hash and store
+        import bcrypt
+
+        password_hash = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        ok = self.user_db.update_password(int(user_id), password_hash)
+        if not ok:
+            return _json_response({"success": False, "error": "password_update_failed"}, status=500)
+        # Revoke existing refresh sessions for safety.
+        try:
+            self.session_store.revoke_user_sessions(int(user_id))
+        except Exception:
+            pass
+        self._ops("password_reset_consumed", {"user_id": str(user_id)})
+        return _json_response({"success": True})
+
     async def ws_handler(self, request: web.Request) -> web.StreamResponse:
         if not self._check_origin(request):
             raise web.HTTPForbidden(text="origin_not_allowed")
+        if _fetch_metadata_blocks_cross_site(dict(request.headers)):
+            raise web.HTTPForbidden(text="cross_site_blocked")
+        self._metrics_counters["dawn_ws_connections_total"] += 1
         ws = web.WebSocketResponse(heartbeat=20, receive_timeout=60)
         await ws.prepare(request)
 
         self._clients.add(ws)
+        self._metrics_gauges["dawn_ws_clients"] = len(self._clients)
 
         # Identify user:
         # - Prefer HttpOnly cookie (safe for public deployments)
@@ -552,6 +1382,7 @@ class RealtimeChatServer:
                 ],
                 "presence": self._current_presence(room),
                 "history": [m.to_dict() for m in self.chat_store.get_recent(room=room, limit=200)],
+                "tasks": [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t],
                 "ts": time.time(),
             },
         )
@@ -591,6 +1422,17 @@ class RealtimeChatServer:
             return
 
         msg_type = payload.get("type")
+        self._log_json(
+            "info",
+            {
+                "event": "ws_in",
+                "msg_type": msg_type,
+                "room": sess.room,
+                "sender_type": sess.sender_type,
+                "sender_id": sess.sender_id,
+            },
+        )
+        self._ops("ws_in", {"msg_type": msg_type, "room": sess.room, "sender_type": sess.sender_type, "sender_id": sess.sender_id})
         if msg_type == "chat":
             content = _truncate_message(str(payload.get("content", "")))
             room = _sanitize_room(payload.get("room") or sess.room)
@@ -600,6 +1442,365 @@ class RealtimeChatServer:
         if msg_type == "set_room":
             room = _sanitize_room(payload.get("room"))
             await self._move_room(sess, room)
+            return
+
+        if msg_type == "create_task":
+            room = _sanitize_room(payload.get("room") or sess.room)
+            target = str(payload.get("target") or "").strip() or "all"
+            prompt = _truncate_message(str(payload.get("prompt") or ""), limit=8000)
+            if not prompt:
+                await self._send(ws, {"type": "error", "error": "prompt_required"})
+                return
+            now = time.time()
+            who = self._rate_limit_key(sess)
+            limit = self.max_tasks_per_minute_human if sess.sender_type == "human" else self.max_tasks_per_minute_guest
+            if not _rate_allow(self._action_rate[f"{who}:create_task"], now=now, window_seconds=60.0, limit=limit):
+                await self._send(ws, {"type": "error", "error": "rate_limited"})
+                return
+            await self._create_tasks(room, sess, target, prompt)
+            self._metrics_counters["dawn_tasks_created_total"] += 1
+            self._ops("create_task", {"room": room, "target": target, "by": sess.sender_id or f"guest:{sess.sender_name}"})
+            # Nudge clients to refresh tasks.
+            tasks = [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t]
+            await self._broadcast(room, {"type": "tasks", "room": room, "tasks": tasks, "ts": time.time()})
+            return
+
+        if msg_type == "rate_task":
+            task_id = str(payload.get("task_id") or "").strip()
+            if not task_id:
+                await self._send(ws, {"type": "error", "error": "task_id_required"})
+                return
+            try:
+                rating = int(payload.get("rating"))
+            except Exception:
+                await self._send(ws, {"type": "error", "error": "rating_must_be_1_to_5"})
+                return
+            comment = payload.get("comment")
+            if comment is not None:
+                comment = _truncate_message(str(comment), limit=1000)
+            t = self.task_store.get_task(task_id)
+            if not t:
+                await self._send(ws, {"type": "error", "error": "unknown_task"})
+                return
+            if t.room != sess.room and not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "not_in_task_room"})
+                return
+            now = time.time()
+            who = self._rate_limit_key(sess)
+            if not _rate_allow(self._action_rate[f"{who}:rate_task"], now=now, window_seconds=60.0, limit=self.max_ratings_per_minute):
+                await self._send(ws, {"type": "error", "error": "rate_limited"})
+                return
+            try:
+                self.task_store.record_rating(
+                    task_id,
+                    rater_id=str(sess.sender_id or f"guest:{sess.sender_name}"),
+                    rating=rating,
+                    comment=comment,
+                )
+            except Exception as e:
+                await self._send(ws, {"type": "error", "error": str(e)})
+                return
+            self._metrics_counters["dawn_task_ratings_total"] += 1
+            self._ops("rate_task", {"task_id": task_id, "rating": rating, "by": sess.sender_id or f"guest:{sess.sender_name}"})
+            await self._send(ws, {"type": "rated", "task_id": task_id, "rating": rating, "ts": time.time()})
+            await self._system(t.room, f"Recorded rating for {task_id}: {rating}/5")
+            return
+
+        if msg_type == "get_tasks":
+            room = _sanitize_room(payload.get("room") or sess.room)
+            tasks = [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t]
+            await self._send(ws, {"type": "tasks", "room": room, "tasks": tasks, "ts": time.time()})
+            return
+
+        if msg_type == "get_task":
+            task_id = str(payload.get("task_id") or "").strip()
+            if not task_id:
+                await self._send(ws, {"type": "error", "error": "task_id_required"})
+                return
+            t = self.task_store.get_task(task_id)
+            if not t:
+                await self._send(ws, {"type": "error", "error": "unknown_task"})
+                return
+            evs = self.task_store.get_events(task_id, after_id=0, limit=200)
+            artifacts = _list_files_under(self.workspace_root, f"artifacts/{task_id}", limit=200)
+            await self._send(
+                ws,
+                {
+                    "type": "task_detail",
+                    "task": _task_public(t),
+                    "events": [e.to_dict() for e in evs],
+                    "artifacts": artifacts,
+                    "ts": time.time(),
+                },
+            )
+            return
+
+        if msg_type == "get_file":
+            rel_path = str(payload.get("path") or "").strip()
+            if not rel_path:
+                await self._send(ws, {"type": "error", "error": "path_required"})
+                return
+            if not _is_allowed_read_path(rel_path, self.file_read_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            try:
+                res = _read_text_file(self.workspace_root, rel_path, max_bytes=int(payload.get("max_bytes") or 100_000))
+            except Exception as e:
+                res = {"ok": False, "error": str(e)}
+            if not res.get("ok"):
+                await self._send(ws, {"type": "error", "error": res.get("error") or "read_failed"})
+                return
+            await self._send(
+                ws,
+                {
+                    "type": "file",
+                    "path": res["path"],
+                    "content": res.get("content") or "",
+                    "truncated": bool(res.get("truncated")),
+                    "ts": time.time(),
+                },
+            )
+            return
+
+        if msg_type == "get_git_status":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            porcelain = bool(payload.get("porcelain", True))
+            res = _git_status(self.workspace_root, porcelain=porcelain).to_dict()
+            await self._send(ws, {"type": "git_status", "result": res, "ts": time.time()})
+            return
+
+        if msg_type == "get_git_diff":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            path = str(payload.get("path") or "").strip()
+            if not path:
+                await self._send(ws, {"type": "error", "error": "path_required"})
+                return
+            if not _is_allowed_git_path(path, self.git_diff_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            staged = bool(payload.get("staged", False))
+            res = _git_diff(self.workspace_root, staged=staged, path=path).to_dict()
+            await self._send(ws, {"type": "git_diff", "result": res, "ts": time.time()})
+            return
+
+        if msg_type == "get_audit":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            try:
+                limit = int(payload.get("limit") or 100)
+            except Exception:
+                limit = 100
+            room = payload.get("room")
+            room_s = _sanitize_room(room) if room else None
+            events = self.moderation.list_events(limit=limit, room=room_s)
+            await self._send(ws, {"type": "audit_events", "events": events, "ts": time.time()})
+            return
+
+        if msg_type == "get_ops":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            if not self.ops_log:
+                await self._send(ws, {"type": "ops_events", "enabled": False, "events": [], "ts": time.time()})
+                return
+            try:
+                limit = int(payload.get("limit") or 200)
+            except Exception:
+                limit = 200
+            et = payload.get("event_type")
+            event_type = str(et).strip() if et else None
+            rm = payload.get("room")
+            room_s = _sanitize_room(rm) if rm else None
+            evs = [e.to_dict() for e in self.ops_log.list_recent(limit=limit, event_type=event_type or None, room=room_s)]
+            await self._send(ws, {"type": "ops_events", "enabled": True, "events": evs, "ts": time.time()})
+            return
+
+        if msg_type == "set_admin_action_token":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            tok = str(payload.get("token") or "")
+            ok = self._check_admin_action_token(tok)
+            sess.admin_action_ok = bool(ok)
+            await self._send(ws, {"type": "admin_action_token", "ok": bool(ok), "ts": time.time()})
+            return
+
+        if msg_type == "check_patch":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            patch_path = str(payload.get("patch_path") or "").strip()
+            if not patch_path:
+                await self._send(ws, {"type": "error", "error": "patch_path_required"})
+                return
+            if not _is_patch_artifact_path(patch_path):
+                await self._send(ws, {"type": "error", "error": "patch_must_end_with_dot_patch"})
+                return
+            if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            try:
+                read_res = _read_text_file(self.workspace_root, patch_path, max_bytes=500_000)
+                if not read_res.get("ok"):
+                    await self._send(ws, {"type": "error", "error": read_res.get("error") or "read_failed"})
+                    return
+                patch_text = str(read_res.get("content") or "")
+                proc = subprocess.run(
+                    ["git", "apply", "--check", "--whitespace=nowarn"],
+                    cwd=str(self.workspace_root),
+                    input=patch_text.encode("utf-8"),
+                    capture_output=True,
+                    timeout=8.0,
+                    check=False,
+                )
+                out = (proc.stdout or b"").decode("utf-8", errors="replace")
+                err = (proc.stderr or b"").decode("utf-8", errors="replace")
+                try:
+                    self.moderation.audit(
+                        action="patch_check",
+                        actor_user_id=sess.sender_id,
+                        actor_name=sess.sender_name,
+                        actor_ip=sess.ip,
+                        room=sess.room,
+                        target=patch_path,
+                        reason=f"ok={proc.returncode == 0} exit={proc.returncode}",
+                    )
+                except Exception:
+                    pass
+                await self._send(
+                    ws,
+                    {
+                        "type": "patch_check",
+                        "ok": proc.returncode == 0,
+                        "patch_path": patch_path,
+                        "exit_code": int(proc.returncode),
+                        "stdout": out[:20000],
+                        "stderr": err[:20000],
+                        "truncated": (len(out) > 20000 or len(err) > 20000),
+                        "ts": time.time(),
+                    },
+                )
+                self._metrics_counters["dawn_patch_checks_total"] += 1
+            except Exception as e:
+                await self._send(ws, {"type": "patch_check", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
+            return
+
+        if msg_type == "stat_patch":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            patch_path = str(payload.get("patch_path") or "").strip()
+            if not patch_path:
+                await self._send(ws, {"type": "error", "error": "patch_path_required"})
+                return
+            if not _is_patch_artifact_path(patch_path):
+                await self._send(ws, {"type": "error", "error": "patch_must_end_with_dot_patch"})
+                return
+            if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            try:
+                read_res = _read_text_file(self.workspace_root, patch_path, max_bytes=500_000)
+                if not read_res.get("ok"):
+                    await self._send(ws, {"type": "error", "error": read_res.get("error") or "read_failed"})
+                    return
+                patch_text = str(read_res.get("content") or "")
+                stat = _git_apply_stat(repo_root=self.workspace_root, patch_text=patch_text)
+                try:
+                    self.moderation.audit(
+                        action="patch_stat",
+                        actor_user_id=sess.sender_id,
+                        actor_name=sess.sender_name,
+                        actor_ip=sess.ip,
+                        room=sess.room,
+                        target=patch_path,
+                        reason=f"ok={bool(stat.get('ok'))} exit={stat.get('exit_code')}",
+                    )
+                except Exception:
+                    pass
+                await self._send(
+                    ws,
+                    {
+                        "type": "patch_stat",
+                        "patch_path": patch_path,
+                        "ts": time.time(),
+                        **stat,
+                    },
+                )
+                self._metrics_counters["dawn_patch_stats_total"] += 1
+            except Exception as e:
+                await self._send(ws, {"type": "patch_stat", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
+            return
+
+        if msg_type == "apply_patch":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._send(ws, {"type": "error", "error": "admin_action_token_required"})
+                return
+            patch_path = str(payload.get("patch_path") or "").strip()
+            if not patch_path:
+                await self._send(ws, {"type": "error", "error": "patch_path_required"})
+                return
+            if not _is_patch_artifact_path(patch_path):
+                await self._send(ws, {"type": "error", "error": "patch_must_end_with_dot_patch"})
+                return
+            if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            try:
+                read_res = _read_text_file(self.workspace_root, patch_path, max_bytes=500_000)
+                if not read_res.get("ok"):
+                    await self._send(ws, {"type": "error", "error": read_res.get("error") or "read_failed"})
+                    return
+                patch_text = str(read_res.get("content") or "")
+                proc = subprocess.run(
+                    ["git", "apply", "--whitespace=nowarn"],
+                    cwd=str(self.workspace_root),
+                    input=patch_text.encode("utf-8"),
+                    capture_output=True,
+                    timeout=8.0,
+                    check=False,
+                )
+                out = (proc.stdout or b"").decode("utf-8", errors="replace")
+                err = (proc.stderr or b"").decode("utf-8", errors="replace")
+                try:
+                    self.moderation.audit(
+                        action="patch_apply",
+                        actor_user_id=sess.sender_id,
+                        actor_name=sess.sender_name,
+                        actor_ip=sess.ip,
+                        room=sess.room,
+                        target=patch_path,
+                        reason=f"ok={proc.returncode == 0} exit={proc.returncode}",
+                    )
+                except Exception:
+                    pass
+                await self._send(
+                    ws,
+                    {
+                        "type": "patch_applied",
+                        "ok": proc.returncode == 0,
+                        "patch_path": patch_path,
+                        "exit_code": int(proc.returncode),
+                        "stdout": out[:20000],
+                        "stderr": err[:20000],
+                        "truncated": (len(out) > 20000 or len(err) > 20000),
+                        "ts": time.time(),
+                    },
+                )
+                # If applied successfully, broadcast updated tasks list (and repo status stays manual).
+                if proc.returncode == 0:
+                    await self._system(sess.room, f"Applied patch: {patch_path}")
+                self._metrics_counters["dawn_patch_applies_total"] += 1
+            except Exception as e:
+                await self._send(ws, {"type": "patch_applied", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
             return
 
         await self._send(ws, {"type": "error", "error": "unknown_message_type"})
@@ -660,6 +1861,7 @@ class RealtimeChatServer:
             content=content,
             created_at_ts=ts,
         )
+        self._metrics_counters["dawn_chat_messages_total"] += 1
         await self._broadcast(room, {"type": "message", "message": msg.to_dict()})
 
     async def _handle_command(self, sess: ClientSession, room: str, content: str) -> None:
@@ -696,6 +1898,9 @@ class RealtimeChatServer:
             if not sess.is_admin:
                 await self._system(room, "Permission denied.")
                 return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._system(room, "Admin action token required (use admin UI to set it).")
+                return
             if len(parts) < 2:
                 await self._system(room, "Usage: /kick <nickname>")
                 return
@@ -715,6 +1920,9 @@ class RealtimeChatServer:
         if cmd == "/mute":
             if not sess.is_admin:
                 await self._system(room, "Permission denied.")
+                return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._system(room, "Admin action token required (use admin UI to set it).")
                 return
             if len(parts) < 2:
                 await self._system(room, "Usage: /mute <nickname> [seconds] [reason...]")
@@ -749,6 +1957,9 @@ class RealtimeChatServer:
             if not sess.is_admin:
                 await self._system(room, "Permission denied.")
                 return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._system(room, "Admin action token required (use admin UI to set it).")
+                return
             if len(parts) < 3:
                 await self._system(room, "Usage: /ban <user|ip> <value> [seconds] [reason...]")
                 return
@@ -782,6 +1993,9 @@ class RealtimeChatServer:
         if cmd == "/room":
             if not sess.is_admin:
                 await self._system(room, "Permission denied.")
+                return
+            if self.require_admin_action_token and not sess.admin_action_ok:
+                await self._system(room, "Admin action token required (use admin UI to set it).")
                 return
             # /room read_only on|off ; /room allow_guests on|off
             if len(parts) < 3:
@@ -1126,6 +2340,7 @@ class RealtimeChatServer:
             content=_truncate_message(text, limit=2000),
             created_at_ts=ts,
         )
+        self._metrics_counters["dawn_chat_messages_total"] += 1
         await self._broadcast(room, {"type": "message", "message": msg.to_dict()})
 
     async def _spawn_agent(self, room: str) -> None:
@@ -1217,13 +2432,70 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
     app = web.Application(client_max_size=2 * 1024 * 1024)
     app["server"] = server
 
+    @web.middleware
+    async def request_id_middleware(request: web.Request, handler):
+        rid = request.headers.get("X-Request-Id") or secrets.token_hex(8)
+        try:
+            resp = await handler(request)
+        except web.HTTPException as e:
+            e.headers["X-Request-Id"] = rid
+            raise
+        resp.headers["X-Request-Id"] = rid
+        return resp
+
+    app.middlewares.append(request_id_middleware)
+
+    @web.middleware
+    async def security_headers_middleware(request: web.Request, handler):
+        resp = await handler(request)
+        # Basic hardening headers
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+
+        # CSP: the built-in UI uses inline CSS/JS; keep it self-contained.
+        # You can override this via CHAT_CSP if you serve your own UI.
+        csp = (os.getenv("CHAT_CSP") or "").strip()
+        if not csp:
+            csp = (
+                "default-src 'self'; "
+                "connect-src 'self' ws: wss:; "
+                "img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline'"
+            )
+        resp.headers.setdefault("Content-Security-Policy", csp)
+
+        # HSTS only when served over HTTPS (or behind a proxy that sets X-Forwarded-Proto).
+        if ENV == "prod":
+            proto = (request.headers.get("X-Forwarded-Proto") or request.scheme or "").lower()
+            if proto == "https":
+                resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+        return resp
+
+    app.middlewares.append(security_headers_middleware)
+
     app.router.add_get("/", server.http_index)
     app.router.add_get("/healthz", server.http_health)
+    app.router.add_get("/metrics", server.http_metrics)
+    app.router.add_get("/admin/health", server.http_admin_health)
+    app.router.add_get("/api/csrf", server.http_csrf)
 
     app.router.add_post("/api/register", server.http_register)
     app.router.add_post("/api/login", server.http_login)
     app.router.add_post("/api/logout", server.http_logout)
+    app.router.add_post("/api/refresh", server.http_refresh)
+    app.router.add_post("/api/password_reset/request", server.http_password_reset_request)
+    app.router.add_post("/api/password_reset/confirm", server.http_password_reset_confirm)
     app.router.add_get("/api/me", server.http_me)
+
+    app.router.add_get("/admin/users", server.http_admin_users_list)
+    app.router.add_post("/admin/users/{username}/deactivate", server.http_admin_user_deactivate)
+    app.router.add_post("/admin/users/{username}/reactivate", server.http_admin_user_reactivate)
+    app.router.add_post("/admin/users/{username}/set_password", server.http_admin_user_set_password)
+    app.router.add_post("/admin/users/{username}/revoke_sessions", server.http_admin_user_revoke_sessions)
     app.router.add_get("/ws", server.ws_handler)
 
     async def _on_cleanup(app_: web.Application) -> None:
@@ -1289,6 +2561,16 @@ _INDEX_HTML = r"""<!doctype html>
     .auth input { width: 140px; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; }
     .hint { color:#6f6; font-size: 12px; margin-top: 6px; }
     .sep { border-top:1px solid #0f0; margin: 10px 0; }
+    .taskItem { cursor:pointer; color:#9f9; font-size: 12px; margin: 6px 0; }
+    .taskItem:hover { color:#0ff; }
+    #task-detail { white-space: pre-wrap; word-break: break-word; font-size: 12px; color:#cfc; margin-top:6px; }
+    #file-viewer { white-space: pre-wrap; word-break: break-word; font-size: 12px; color:#cfc; margin-top:6px; border:1px dashed #0f0; padding:8px; }
+    textarea { width: 100%; min-height: 90px; padding: 8px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box; }
+    select { width: 100%; padding: 6px; border:1px solid #0f0; background:#000; color:#0f0; }
+    .miniBtn { padding: 4px 6px; border:1px solid #0f0; background:#001100; color:#0f0; cursor:pointer; font-size: 11px; }
+    .miniBtn:hover { border-color:#0ff; color:#0ff; }
+    .dangerBtn { border-color:#f00; color:#f88; }
+    .dangerBtn:hover { border-color:#f55; color:#fdd; }
     a { color:#0ff; }
   </style>
 </head>
@@ -1310,6 +2592,75 @@ _INDEX_HTML = r"""<!doctype html>
         <div class="sep"></div>
         <div><strong>Agents</strong></div>
         <div id="agents" class="hint">—</div>
+        <div class="sep"></div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+          <div><strong>Tasks</strong></div>
+          <button id="refresh-tasks" style="padding:6px 8px;">refresh</button>
+        </div>
+        <div id="tasks" class="hint">—</div>
+        <div id="task-detail" class="hint"> </div>
+        <div class="sep"></div>
+        <div><strong>Artifacts</strong></div>
+        <div id="artifacts" class="hint">—</div>
+        <div id="file-viewer" class="hint"> </div>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="patch-check" class="miniBtn">check patch</button>
+          <button id="patch-apply" class="miniBtn dangerBtn">apply patch</button>
+        </div>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <input id="admin-action-token" placeholder="admin action token" style="flex:1; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
+          <button id="set-admin-token" class="miniBtn">set</button>
+        </div>
+        <div id="patch-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
+        <div class="sep"></div>
+        <div><strong>Repo (admin)</strong></div>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="repo-status" class="miniBtn">status</button>
+          <button id="repo-diff" class="miniBtn">diff</button>
+        </div>
+        <div class="hint" style="margin-top:6px;">Diff path (allowlisted):</div>
+        <input id="repo-diff-path" placeholder="e.g. artifacts/ or core/orchestrator.py" style="width:100%; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
+        <div id="repo-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
+        <div class="sep"></div>
+        <div><strong>Audit (admin)</strong></div>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="audit-refresh" class="miniBtn">refresh</button>
+          <button id="audit-room" class="miniBtn">this room</button>
+        </div>
+        <div id="audit-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
+        <div class="sep"></div>
+        <div><strong>Ops (admin)</strong></div>
+        <div class="hint" style="margin-top:6px;">Event type (optional):</div>
+        <input id="ops-type" placeholder="e.g. create_task" style="width:100%; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="ops-refresh" class="miniBtn">refresh</button>
+          <button id="ops-room" class="miniBtn">this room</button>
+        </div>
+        <div id="ops-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
+        <div class="sep"></div>
+        <div><strong>New Task</strong></div>
+        <div class="hint">Assign to:</div>
+        <select id="task-target">
+          <option value="all">all</option>
+        </select>
+        <div class="hint" style="margin-top:6px;">Prompt:</div>
+        <textarea id="task-prompt" placeholder="Describe the work you want done…"></textarea>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="submit-task" style="padding:6px 8px;">submit</button>
+          <button id="clear-task" style="padding:6px 8px;">clear</button>
+        </div>
+        <div class="sep"></div>
+        <div><strong>Rate Task</strong></div>
+        <div class="hint">Select a task (above) to rate it.</div>
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="rate-btn" data-rate="1" style="padding:6px 8px;">1</button>
+          <button class="rate-btn" data-rate="2" style="padding:6px 8px;">2</button>
+          <button class="rate-btn" data-rate="3" style="padding:6px 8px;">3</button>
+          <button class="rate-btn" data-rate="4" style="padding:6px 8px;">4</button>
+          <button class="rate-btn" data-rate="5" style="padding:6px 8px;">5</button>
+        </div>
+        <div class="hint" style="margin-top:6px;">Comment (optional):</div>
+        <input id="rate-comment" placeholder="short feedback…" style="width:100%; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
         <div class="sep"></div>
         <div><strong>Auth</strong></div>
         <div class="auth">
@@ -1343,6 +2694,32 @@ _INDEX_HTML = r"""<!doctype html>
     const logEl = document.getElementById('log');
     const presenceEl = document.getElementById('presence');
     const agentsEl = document.getElementById('agents');
+    const tasksEl = document.getElementById('tasks');
+    const taskDetailEl = document.getElementById('task-detail');
+    const refreshTasksBtn = document.getElementById('refresh-tasks');
+    const artifactsEl = document.getElementById('artifacts');
+    const fileViewerEl = document.getElementById('file-viewer');
+    const taskTargetEl = document.getElementById('task-target');
+    const taskPromptEl = document.getElementById('task-prompt');
+    const submitTaskBtn = document.getElementById('submit-task');
+    const clearTaskBtn = document.getElementById('clear-task');
+    const rateCommentEl = document.getElementById('rate-comment');
+    const repoStatusBtn = document.getElementById('repo-status');
+    const repoDiffBtn = document.getElementById('repo-diff');
+    const repoDiffPathEl = document.getElementById('repo-diff-path');
+    const repoOutEl = document.getElementById('repo-out');
+    const auditRefreshBtn = document.getElementById('audit-refresh');
+    const auditRoomBtn = document.getElementById('audit-room');
+    const auditOutEl = document.getElementById('audit-out');
+    const opsTypeEl = document.getElementById('ops-type');
+    const opsRefreshBtn = document.getElementById('ops-refresh');
+    const opsRoomBtn = document.getElementById('ops-room');
+    const opsOutEl = document.getElementById('ops-out');
+    const patchCheckBtn = document.getElementById('patch-check');
+    const patchApplyBtn = document.getElementById('patch-apply');
+    const adminTokenEl = document.getElementById('admin-action-token');
+    const setAdminTokenBtn = document.getElementById('set-admin-token');
+    const patchOutEl = document.getElementById('patch-out');
 
     const msgEl = document.getElementById('msg');
     const sendBtn = document.getElementById('send');
@@ -1359,6 +2736,14 @@ _INDEX_HTML = r"""<!doctype html>
     // We intentionally do NOT store tokens in localStorage or put them in URLs.
     let ws = null;
     let room = 'lobby';
+    let tasksById = new Map();
+    let artifacts = [];
+    let selectedTaskId = null;
+    let selectedTaskDetail = null; // {task, events, artifacts}
+    let agents = [];
+    let selectedFilePath = null;
+    let csrfToken = null;
+    let didTryRefresh = false;
 
     function fmtTs(ts) {
       try { return new Date(ts * 1000).toLocaleTimeString([], {hour12:false}); } catch { return ''; }
@@ -1392,10 +2777,130 @@ _INDEX_HTML = r"""<!doctype html>
       agentsEl.textContent = lines.length ? lines.join('\\n') : '—';
     }
 
+    function setAgentOptions(agents_) {
+      agents = agents_ || [];
+      taskTargetEl.innerHTML = '';
+      const optAll = document.createElement('option');
+      optAll.value = 'all';
+      optAll.textContent = 'all';
+      taskTargetEl.appendChild(optAll);
+      for (const a of agents) {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = `${a.name} (${a.id})`;
+        taskTargetEl.appendChild(opt);
+      }
+    }
+
+    function renderTasks() {
+      const list = Array.from(tasksById.values())
+        .filter(t => t.room === room)
+        .sort((a,b) => (b.created_at_ts||0) - (a.created_at_ts||0))
+        .slice(0, 25);
+      tasksEl.innerHTML = '';
+      if (!list.length) {
+        tasksEl.textContent = '—';
+        return;
+      }
+      for (const t of list) {
+        const div = document.createElement('div');
+        div.className = 'taskItem';
+        div.textContent = `${t.status} ${t.id} (${t.assigned_to}) — ${t.title}`;
+        div.onclick = () => {
+          selectedTaskId = t.id;
+          taskDetailEl.textContent = 'Loading task…';
+          artifacts = [];
+          artifactsEl.textContent = '—';
+          fileViewerEl.textContent = ' ';
+          try { ws?.send(JSON.stringify({type:'get_task', task_id: t.id})); } catch {}
+        };
+        tasksEl.appendChild(div);
+      }
+    }
+
+    function setTasks(tasks) {
+      tasksById = new Map();
+      for (const t of (tasks || [])) {
+        if (t && t.id) tasksById.set(t.id, t);
+      }
+      renderTasks();
+    }
+
+    function upsertTask(t) {
+      if (!t || !t.id) return;
+      tasksById.set(t.id, t);
+      renderTasks();
+    }
+
+    function renderArtifacts() {
+      artifactsEl.innerHTML = '';
+      if (!artifacts || !artifacts.length) {
+        artifactsEl.textContent = '—';
+        return;
+      }
+      for (const p of artifacts.slice(0, 50)) {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.gap = '8px';
+        row.style.alignItems = 'center';
+        row.style.justifyContent = 'space-between';
+
+        const pathEl = document.createElement('div');
+        pathEl.className = 'taskItem';
+        pathEl.style.flex = '1';
+        pathEl.textContent = p;
+        pathEl.onclick = () => {
+          selectedFilePath = p;
+          fileViewerEl.textContent = 'Loading file…';
+          try { ws?.send(JSON.stringify({type:'get_file', path: p, max_bytes: 120000})); } catch {}
+        };
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'miniBtn';
+        copyBtn.textContent = 'copy';
+        copyBtn.onclick = (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          try { navigator.clipboard.writeText(p); } catch {}
+        };
+
+        row.appendChild(pathEl);
+        row.appendChild(copyBtn);
+        artifactsEl.appendChild(row);
+      }
+    }
+
+    async function refreshCsrf() {
+      try {
+        const res = await fetch('/api/csrf', { method:'GET' });
+        const data = await res.json();
+        if (data && data.success && data.csrf_token) csrfToken = data.csrf_token;
+      } catch {}
+    }
+
     async function auth(path, payload) {
-      const res = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-      const data = await res.json();
+      if (!csrfToken) await refreshCsrf();
+      const headers = {'Content-Type':'application/json'};
+      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      let res = await fetch(path, { method:'POST', headers, body: JSON.stringify(payload) });
+      let data = null;
+      try { data = await res.json(); } catch { data = {success:false, error:'bad_json'}; }
+      if (!data.success && data.error === 'csrf_failed') {
+        await refreshCsrf();
+        if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+        res = await fetch(path, { method:'POST', headers, body: JSON.stringify(payload) });
+        try { data = await res.json(); } catch { data = {success:false, error:'bad_json'}; }
+      }
       if (!data.success) throw new Error(data.error || 'auth_failed');
+      return data;
+    }
+
+    async function refreshSession() {
+      if (!csrfToken) await refreshCsrf();
+      const headers = {};
+      if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+      const res = await fetch('/api/refresh', { method:'POST', headers });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'refresh_failed');
       return data;
     }
 
@@ -1406,6 +2911,11 @@ _INDEX_HTML = r"""<!doctype html>
         if (data.success && data.authenticated) {
           authStatusEl.textContent = `auth: ${data.user.nickname} (${data.user.username})${data.is_admin ? ' [admin]' : ''}`;
         } else {
+          // Best-effort: if we have a refresh session cookie, try refreshing once.
+          if (!didTryRefresh) {
+            didTryRefresh = true;
+            try { await refreshSession(); return await refreshMe(); } catch {}
+          }
           authStatusEl.textContent = 'auth: guest';
         }
       } catch {
@@ -1426,10 +2936,46 @@ _INDEX_HTML = r"""<!doctype html>
     }
 
     function logout() {
-      fetch('/api/logout', { method:'POST' })
-        .then(() => connect())
-        .then(() => refreshMe())
-        .catch(() => { connect(); refreshMe(); });
+      (async () => {
+        try {
+          if (!csrfToken) await refreshCsrf();
+          const headers = {};
+          if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
+          await fetch('/api/logout', { method:'POST', headers });
+        } catch {}
+        try { connect(); } catch {}
+        try { await refreshMe(); } catch {}
+      })();
+    }
+
+    function renderSelectedTaskDetail() {
+      if (!selectedTaskDetail || !selectedTaskDetail.task) {
+        taskDetailEl.textContent = ' ';
+        return;
+      }
+      const t = selectedTaskDetail.task;
+      const evs = selectedTaskDetail.events || [];
+      const lines = [];
+      lines.push(`id=${t.id} status=${t.status} agent=${t.assigned_to}`);
+      lines.push(`title: ${t.title}`);
+      if (t.error) lines.push(`error: ${t.error}`);
+      if (t.result) { lines.push('result:'); lines.push(String(t.result)); }
+      if (evs.length) {
+        lines.push('events:');
+        for (const e of evs.slice(-50)) {
+          // normalize between server event dicts and live events
+          if (e.event_type) {
+            lines.push(`- ${e.id} ${e.event_type} ${JSON.stringify(e.payload)}`);
+          } else if (e.kind === 'progress') {
+            lines.push(`- live progress step=${e.step}: ${e.do}`);
+          } else if (e.kind === 'tool') {
+            lines.push(`- live tool: ${e.name}`);
+          } else {
+            lines.push(`- live ${JSON.stringify(e)}`);
+          }
+        }
+      }
+      taskDetailEl.textContent = lines.join('\\n');
     }
 
     function connect() {
@@ -1440,6 +2986,16 @@ _INDEX_HTML = r"""<!doctype html>
 
       presenceEl.textContent = 'Connecting…';
       agentsEl.textContent = '—';
+      tasksEl.textContent = '—';
+      taskDetailEl.textContent = ' ';
+      artifactsEl.textContent = '—';
+      fileViewerEl.textContent = ' ';
+      patchOutEl.textContent = ' ';
+      selectedFilePath = null;
+      repoOutEl.textContent = ' ';
+      auditOutEl.textContent = ' ';
+      opsOutEl.textContent = ' ';
+      selectedTaskDetail = null;
 
       ws.onmessage = (evt) => {
         let msg;
@@ -1451,7 +3007,18 @@ _INDEX_HTML = r"""<!doctype html>
           logEl.innerHTML = '';
           (msg.history || []).forEach(addLine);
           setAgents(msg.agents || []);
+          setAgentOptions(msg.agents || []);
           setPresence(msg.presence || []);
+          setTasks(msg.tasks || []);
+          artifacts = [];
+          renderArtifacts();
+          fileViewerEl.textContent = ' ';
+          patchOutEl.textContent = ' ';
+          selectedFilePath = null;
+          repoOutEl.textContent = ' ';
+          auditOutEl.textContent = ' ';
+          opsOutEl.textContent = ' ';
+          selectedTaskDetail = null;
           return;
         }
         if (msg.type === 'message') {
@@ -1463,7 +3030,105 @@ _INDEX_HTML = r"""<!doctype html>
           return;
         }
         if (msg.type === 'who') { setPresence(msg.presence || []); return; }
-        if (msg.type === 'agents') { setAgents(msg.agents || []); return; }
+        if (msg.type === 'agents') { setAgents(msg.agents || []); setAgentOptions(msg.agents || []); return; }
+        if (msg.type === 'tasks') { setTasks(msg.tasks || []); return; }
+        if (msg.type === 'task') {
+          // Live task updates (status/progress/tool) for UI streaming.
+          if (msg.task) upsertTask(msg.task);
+          if (selectedTaskId) {
+            if (msg.task && msg.task.id === selectedTaskId) {
+              selectedTaskDetail = selectedTaskDetail || {task: msg.task, events: [], artifacts: artifacts};
+              selectedTaskDetail.task = msg.task;
+              renderSelectedTaskDetail();
+            } else if (msg.task_id && msg.task_id === selectedTaskId) {
+              selectedTaskDetail = selectedTaskDetail || {task: tasksById.get(selectedTaskId), events: [], artifacts: artifacts};
+              selectedTaskDetail.events = selectedTaskDetail.events || [];
+              if (msg.event === 'progress') {
+                selectedTaskDetail.events.push({kind:'progress', step: msg.step, do: msg.do, ts: msg.ts});
+              } else if (msg.event === 'tool') {
+                selectedTaskDetail.events.push({kind:'tool', name: msg.name, ts: msg.ts});
+              }
+              renderSelectedTaskDetail();
+            }
+          }
+          return;
+        }
+        if (msg.type === 'task_detail') {
+          const t = msg.task;
+          if (t) upsertTask(t);
+          const evs = msg.events || [];
+          artifacts = msg.artifacts || [];
+          renderArtifacts();
+          selectedTaskDetail = {task: t, events: evs, artifacts: artifacts};
+          renderSelectedTaskDetail();
+          return;
+        }
+        if (msg.type === 'file') {
+          const header = `[${msg.path}]${msg.truncated ? ' (truncated)' : ''}\\n\\n`;
+          fileViewerEl.textContent = header + (msg.content || '');
+          return;
+        }
+        if (msg.type === 'patch_check' || msg.type === 'patch_applied') {
+          const head = `${msg.type} ${msg.ok ? 'OK' : 'FAIL'} (exit=${msg.exit_code ?? 'n/a'})\\n`;
+          const out = (msg.stdout || '').trim();
+          const err = (msg.stderr || '').trim();
+          const extra = msg.error ? (`\\nerror: ${msg.error}`) : '';
+          patchOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '') + extra;
+          return;
+        }
+        if (msg.type === 'admin_action_token') {
+          patchOutEl.textContent = msg.ok ? 'Admin action token set (OK).' : 'Admin action token rejected.';
+          return;
+        }
+        if (msg.type === 'patch_stat') {
+          const head = `patch_stat ${msg.ok ? 'OK' : 'FAIL'} (exit=${msg.exit_code ?? 'n/a'})\\n`;
+          const out = (msg.stdout || '').trim();
+          const err = (msg.stderr || '').trim();
+          const extra = msg.error ? (`\\nerror: ${msg.error}`) : '';
+          patchOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '') + extra;
+          return;
+        }
+        if (msg.type === 'git_status' || msg.type === 'git_diff') {
+          const r = msg.result || {};
+          const head = `${r.cmd || 'git'} (exit=${r.exit_code})${r.truncated ? ' [truncated]' : ''}\\n`;
+          const out = (r.stdout || '').trim();
+          const err = (r.stderr || '').trim();
+          repoOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '');
+          return;
+        }
+        if (msg.type === 'audit_events') {
+          const evs = msg.events || [];
+          const lines = [];
+          for (const e of evs.slice(0, 200)) {
+            const who = e.actor_name || e.actor_user_id || 'unknown';
+            const where = e.room ? ` room=${e.room}` : '';
+            const tgt = e.target ? ` target=${e.target}` : '';
+            const reason = e.reason ? ` reason=${e.reason}` : '';
+            lines.push(`#${e.id} ${e.action} by=${who}${where}${tgt}${reason}`);
+          }
+          auditOutEl.textContent = lines.join('\\n') || '—';
+          return;
+        }
+        if (msg.type === 'ops_events') {
+          if (!msg.enabled) {
+            opsOutEl.textContent = 'Ops log is disabled (DAWN_OPS_LOG_ENABLED=false).';
+            return;
+          }
+          const evs = msg.events || [];
+          const lines = [];
+          for (const e of evs.slice(0, 200)) {
+            const room = e.payload?.room ? ` room=${e.payload.room}` : '';
+            lines.push(`#${e.id} ${e.event_type}${room} ${JSON.stringify(e.payload || {})}`);
+          }
+          opsOutEl.textContent = lines.join('\\n') || '—';
+          return;
+        }
+        if (msg.type === 'rated') {
+          if (selectedTaskId) {
+            try { ws?.send(JSON.stringify({type:'get_task', task_id: selectedTaskId})); } catch {}
+          }
+          return;
+        }
       };
 
       ws.onopen = () => { /* noop */ };
@@ -1482,11 +3147,106 @@ _INDEX_HTML = r"""<!doctype html>
     loginBtn.onclick = () => login().catch(e => alert(String(e)));
     registerBtn.onclick = () => register().catch(e => alert(String(e)));
     logoutBtn.onclick = logout;
+    refreshTasksBtn.onclick = () => { try { ws?.send(JSON.stringify({type:'get_tasks', room})); } catch {} };
+    submitTaskBtn.onclick = () => {
+      const prompt = (taskPromptEl.value || '').trim();
+      const target = (taskTargetEl.value || 'all').trim();
+      if (!prompt) return;
+      try { ws?.send(JSON.stringify({type:'create_task', room, target, prompt})); } catch {}
+      taskPromptEl.value = '';
+    };
+    clearTaskBtn.onclick = () => { taskPromptEl.value = ''; };
+    document.querySelectorAll('.rate-btn').forEach(btn => {
+      btn.onclick = () => {
+        if (!selectedTaskId) return;
+        const rating = parseInt(btn.getAttribute('data-rate') || '0', 10);
+        const comment = (rateCommentEl.value || '').trim();
+        try { ws?.send(JSON.stringify({type:'rate_task', task_id: selectedTaskId, rating, comment: comment || undefined})); } catch {}
+        rateCommentEl.value = '';
+      };
+    });
 
+    repoStatusBtn.onclick = () => {
+      repoOutEl.textContent = 'Loading git status…';
+      try { ws?.send(JSON.stringify({type:'get_git_status', porcelain:true})); } catch {}
+    };
+    repoDiffBtn.onclick = () => {
+      const p = (repoDiffPathEl.value || '').trim();
+      if (!p) { repoOutEl.textContent = 'Provide a diff path first.'; return; }
+      repoOutEl.textContent = 'Loading git diff…';
+      try { ws?.send(JSON.stringify({type:'get_git_diff', path: p, staged:false})); } catch {}
+    };
+
+    auditRefreshBtn.onclick = () => {
+      auditOutEl.textContent = 'Loading audit…';
+      try { ws?.send(JSON.stringify({type:'get_audit', limit: 100})); } catch {}
+    };
+    auditRoomBtn.onclick = () => {
+      auditOutEl.textContent = 'Loading room audit…';
+      try { ws?.send(JSON.stringify({type:'get_audit', limit: 100, room})); } catch {}
+    };
+
+    opsRefreshBtn.onclick = () => {
+      opsOutEl.textContent = 'Loading ops…';
+      const et = (opsTypeEl.value || '').trim();
+      try { ws?.send(JSON.stringify({type:'get_ops', limit: 200, event_type: et || undefined})); } catch {}
+    };
+    opsRoomBtn.onclick = () => {
+      opsOutEl.textContent = 'Loading room ops…';
+      const et = (opsTypeEl.value || '').trim();
+      try { ws?.send(JSON.stringify({type:'get_ops', limit: 200, room, event_type: et || undefined})); } catch {}
+    };
+
+    patchCheckBtn.onclick = () => {
+      if (!selectedFilePath || !selectedFilePath.endsWith('.patch')) {
+        patchOutEl.textContent = 'Select a .patch artifact file first.';
+        return;
+      }
+      patchOutEl.textContent = 'Checking patch…';
+      try { ws?.send(JSON.stringify({type:'check_patch', patch_path: selectedFilePath})); } catch {}
+    };
+    // Preview summary via git apply --stat
+    const patchStatBtn = document.createElement('button');
+    patchStatBtn.className = 'miniBtn';
+    patchStatBtn.textContent = 'stat patch';
+    patchStatBtn.onclick = () => {
+      if (!selectedFilePath || !selectedFilePath.endsWith('.patch')) {
+        patchOutEl.textContent = 'Select a .patch artifact file first.';
+        return;
+      }
+      patchOutEl.textContent = 'Generating patch stat…';
+      try { ws?.send(JSON.stringify({type:'stat_patch', patch_path: selectedFilePath})); } catch {}
+    };
+    // Insert between check and apply (buttons exist in DOM already).
+    try {
+      patchCheckBtn.parentElement?.insertBefore(patchStatBtn, patchApplyBtn);
+    } catch {}
+    patchApplyBtn.onclick = () => {
+      if (!selectedFilePath || !selectedFilePath.endsWith('.patch')) {
+        patchOutEl.textContent = 'Select a .patch artifact file first.';
+        return;
+      }
+      patchOutEl.textContent = 'Applying patch…';
+      try { ws?.send(JSON.stringify({type:'apply_patch', patch_path: selectedFilePath})); } catch {}
+    };
+
+    setAdminTokenBtn.onclick = () => {
+      const tok = (adminTokenEl?.value || '').trim();
+      if (!tok) {
+        patchOutEl.textContent = 'Enter admin action token first.';
+        return;
+      }
+      patchOutEl.textContent = 'Setting admin token…';
+      try { ws?.send(JSON.stringify({type:'set_admin_action_token', token: tok})); } catch {}
+    };
+
+    refreshCsrf();
     connect();
     refreshMe();
     // Refresh presence periodically via /who (cheap and robust).
     setInterval(() => { try { ws?.send(JSON.stringify({ type:'chat', room, content: '/who' })); } catch {} }, 8000);
+    // Refresh tasks periodically as well (cheap).
+    setInterval(() => { try { ws?.send(JSON.stringify({ type:'get_tasks', room })); } catch {} }, 12000);
   </script>
 </body>
 </html>
