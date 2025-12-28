@@ -391,6 +391,7 @@ class AgentOrchestrator:
         # - ask agent to summarize / finalize
         plan = await self._get_plan(agent, task, policy)
         tool_calls = 0
+        tool_results: List[Dict[str, Any]] = []
 
         for i, step in enumerate(plan.get("steps", [])[: max(1, policy.max_plan_steps)]):
             step_desc = str(step.get("do", f"step_{i+1}"))
@@ -412,6 +413,8 @@ class AgentOrchestrator:
                 else:
                     result = {"ok": False, "error": f"unknown_tool:{tool_name}"}
                 self.task_store.append_event(task.id, "tool_result", {"name": tool_name, "result": result})
+                # Keep a compact tool result trace for finalization prompt.
+                tool_results.append({"name": tool_name, "args": tool_args, "result": result})
                 continue
 
             # If not a tool, treat as thinking substep and ask agent to elaborate.
@@ -428,7 +431,7 @@ class AgentOrchestrator:
                 # Non-fatal; continue.
                 pass
 
-        final = await self._finalize(agent, task, policy)
+        final = await self._finalize(agent, task, policy, tool_results=tool_results)
         self.task_store.update_status(task.id, "completed", result=final)
         self.task_store.append_event(task.id, "completed", {"result": final[:5000]})
         await self._emit({"type": "task", "event": "completed", "task": self.task_store.get_task(task.id).to_dict()})
@@ -443,10 +446,13 @@ class AgentOrchestrator:
             "- Only use tools listed.\n"
             f"- Keep <= {max(1, policy.max_plan_steps)} steps.\n"
             f"- Prefer delegation when appropriate (delegation_bias={policy.delegation_bias}).\n"
+            "- If you need to create/update files as deliverables, use fs_write and write under artifacts/<task_id>/...\n"
+            "- If you need to inspect repo state, use fs_list/fs_read.\n"
         )
         prompt = (
             f"{system}\n"
             f"Available tools:\n{json.dumps(tools, ensure_ascii=False)}\n\n"
+            f"Task id: {task.id}\n"
             f"Task title: {task.title}\n"
             f"Task prompt: {task.prompt}\n"
         )
@@ -463,11 +469,26 @@ class AgentOrchestrator:
             self.task_store.append_event(task.id, "progress", {"note": f"planning_fallback:{e}"})
             return {"goal": task.title, "steps": [{"do": "Respond with an actionable summary"}]}
 
-    async def _finalize(self, agent: Any, task: Task, policy: AgentPolicy) -> str:
+    async def _finalize(self, agent: Any, task: Task, policy: AgentPolicy, *, tool_results: Optional[List[Dict[str, Any]]] = None) -> str:
+        tool_results = tool_results or []
+        # Prefer to surface produced artifacts.
+        written: List[str] = []
+        for tr in tool_results:
+            if tr.get("name") != "fs_write":
+                continue
+            res = tr.get("result") or {}
+            if isinstance(res, dict) and res.get("ok") and res.get("path"):
+                written.append(str(res.get("path")))
+
         prompt = (
             f"Finalize this task for the requester.\n"
+            f"Task id: {task.id}\n"
             f"Task: {task.title}\n"
             f"Prompt: {task.prompt}\n"
+            f"Policy: verbosity={policy.verbosity}.\n"
+            f"Tool results (most recent first):\n{json.dumps(list(reversed(tool_results))[:12], ensure_ascii=False)}\n\n"
+            f"If you created files, list them explicitly (paths) and describe what they contain.\n"
+            f"Prefer writing substantial deliverables to artifacts/{task.id}/... and referencing paths.\n"
             f"Return a concise deliverable and next steps.\n"
         )
         try:
@@ -476,5 +497,9 @@ class AgentOrchestrator:
                 timeout=float(policy.step_timeout_seconds),
             )
         except Exception as e:
-            return f"Task completed, but finalization failed: {e}"
+            # Provide fallback that still reports artifacts.
+            extra = ""
+            if written:
+                extra = "\nArtifacts:\n" + "\n".join(f"- {p}" for p in written)
+            return f"Task completed, but finalization failed: {e}{extra}"
 
