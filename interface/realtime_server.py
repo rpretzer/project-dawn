@@ -27,6 +27,7 @@ from aiohttp import web, WSMsgType
 
 from .user_database import UserDatabase
 from .chat_store import ChatStore
+from .moderation_store import ModerationStore
 from core.orchestrator import AgentOrchestrator
 from core.task_manager import TaskStore
 
@@ -60,6 +61,8 @@ class ClientSession:
     sender_type: str  # "human" | "guest"
     sender_id: Optional[str]  # user_id as str
     sender_name: str  # nickname / guest name
+    ip: str
+    is_admin: bool = False
 
 
 def _json_response(payload: Dict[str, Any], *, status: int = 200) -> web.Response:
@@ -119,6 +122,7 @@ class RealtimeChatServer:
         self.chat_store = ChatStore()
         self.task_store = TaskStore()
         self.orchestrator = AgentOrchestrator(agents=self.consciousnesses, swarm=self.swarm, task_store=self.task_store)
+        self.moderation = ModerationStore()
 
         self._clients: Set[web.WebSocketResponse] = set()
         self._sessions: Dict[web.WebSocketResponse, ClientSession] = {}
@@ -136,6 +140,10 @@ class RealtimeChatServer:
         # Simple IP rate limit for auth endpoints (best-effort)
         self.max_auth_per_minute = int(os.getenv("CHAT_MAX_AUTH_PER_MINUTE", "10"))
         self._auth_rate: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))  # ip -> timestamps
+
+        # Policy defaults
+        self.allow_guests_default = os.getenv("CHAT_ALLOW_GUESTS", "true" if ENV != "prod" else "false").lower() == "true"
+        self.admin_usernames = {u.strip().lower() for u in (os.getenv("CHAT_ADMIN_USERNAMES") or "").split(",") if u.strip()}
 
         # Start orchestrator workers and wire event sink to broadcast to rooms
         asyncio.create_task(self.orchestrator.start())
@@ -382,17 +390,32 @@ class RealtimeChatServer:
             token = request.query.get("token")
         claims = _decode_token(token) if token else None
 
+        ip = request.remote or "unknown"
         if claims:
             sender_type = "human"
             sender_id = str(claims.get("sub"))
             sender_name = str(claims.get("nickname") or claims.get("username") or f"User{sender_id}")
+            username = str(claims.get("username") or "").lower()
+            is_admin = bool(username and username in self.admin_usernames)
         else:
             sender_type = "guest"
             sender_id = None
             sender_name = f"Guest{secrets.token_hex(3)}"
+            is_admin = False
+
+        # Ban checks
+        banned, reason = self.moderation.is_banned(user_id=sender_id, ip=ip)
+        if banned:
+            raise web.HTTPForbidden(text=f"banned:{reason or 'banned'}")
 
         room = _sanitize_room(request.query.get("room"))
-        sess = ClientSession(ws=ws, room=room, sender_type=sender_type, sender_id=sender_id, sender_name=sender_name)
+        # Room policy
+        room_settings = self.moderation.get_room_settings(room)
+        allow_guests = room_settings["allow_guests"] if room_settings else self.allow_guests_default
+        if sender_type == "guest" and not allow_guests:
+            raise web.HTTPUnauthorized(text="login_required")
+
+        sess = ClientSession(ws=ws, room=room, sender_type=sender_type, sender_id=sender_id, sender_name=sender_name, ip=ip, is_admin=is_admin)
         self._sessions[ws] = sess
         self._room_sockets(room).add(ws)
 
@@ -403,6 +426,7 @@ class RealtimeChatServer:
                 "type": "hello",
                 "you": {"sender_type": sender_type, "sender_id": sender_id, "sender_name": sender_name},
                 "room": room,
+                "is_admin": is_admin,
                 "agents": [
                     {"id": getattr(c, "id", "agent"), "name": getattr(c, "name", getattr(c, "id", "Agent"))}
                     for c in self.consciousnesses
@@ -465,6 +489,11 @@ class RealtimeChatServer:
         old = sess.room
         if old == room:
             return
+        room_settings = self.moderation.get_room_settings(room)
+        allow_guests = room_settings["allow_guests"] if room_settings else self.allow_guests_default
+        if sess.sender_type == "guest" and not allow_guests:
+            await self._send(sess.ws, {"type": "error", "error": "login_required_for_room"})
+            return
         self._room_sockets(old).discard(sess.ws)
         self._room_sockets(room).add(sess.ws)
         sess.room = room
@@ -491,6 +520,18 @@ class RealtimeChatServer:
             await self._handle_command(sess, room, content)
             return
 
+        # Room read-only
+        room_settings = self.moderation.get_room_settings(room)
+        if room_settings.get("read_only") and not sess.is_admin:
+            await self._send(sess.ws, {"type": "error", "error": "room_read_only"})
+            return
+
+        # Muted
+        muted, _ = self.moderation.is_muted(user_id=sess.sender_id, room=room)
+        if muted and not sess.is_admin:
+            await self._send(sess.ws, {"type": "error", "error": "muted"})
+            return
+
         # Store + broadcast human message
         msg = self.chat_store.append_message(
             room=room,
@@ -509,7 +550,8 @@ class RealtimeChatServer:
         if cmd in ("/help", "/?"):
             await self._system(
                 room,
-                "Commands: /help, /who, /join <room>, /agents, /ask <agent|all> <msg>, /spawn [n], /task <agent|all> <work>, /tasks",
+                "Commands: /help, /who, /join <room>, /agents, /ask <agent|all> <msg>, /spawn [n], /task <agent|all> <work>, /tasks"
+                + (" | Admin: /kick, /mute, /ban, /room" if sess.is_admin else ""),
             )
             return
 
@@ -525,6 +567,88 @@ class RealtimeChatServer:
             new_room = _sanitize_room(parts[1])
             await self._move_room(sess, new_room)
             await self._system(new_room, f"{sess.sender_name} joined {new_room}")
+            return
+
+        # Admin moderation commands
+        if cmd == "/kick":
+            if not sess.is_admin:
+                await self._system(room, "Permission denied.")
+                return
+            if len(parts) < 2:
+                await self._system(room, "Usage: /kick <nickname>")
+                return
+            target = parts[1].strip().lower()
+            await self._kick_by_nick(room, target)
+            return
+
+        if cmd == "/mute":
+            if not sess.is_admin:
+                await self._system(room, "Permission denied.")
+                return
+            if len(parts) < 2:
+                await self._system(room, "Usage: /mute <nickname> [seconds] [reason...]")
+                return
+            target = parts[1].strip().lower()
+            seconds = None
+            reason = "muted"
+            if len(parts) >= 3:
+                try:
+                    seconds = int(parts[2])
+                except Exception:
+                    seconds = None
+            if len(parts) >= 4:
+                reason = " ".join(parts[3:])
+            ok = await self._mute_by_nick(room, target, seconds, reason)
+            if ok:
+                await self._system(room, f"Muted {target}.")
+            else:
+                await self._system(room, f"Could not mute {target}.")
+            return
+
+        if cmd == "/ban":
+            if not sess.is_admin:
+                await self._system(room, "Permission denied.")
+                return
+            if len(parts) < 3:
+                await self._system(room, "Usage: /ban <user|ip> <value> [seconds] [reason...]")
+                return
+            kind = parts[1].strip().lower()
+            value = parts[2].strip()
+            seconds = None
+            reason = "banned"
+            if len(parts) >= 4:
+                try:
+                    seconds = int(parts[3])
+                except Exception:
+                    seconds = None
+            if len(parts) >= 5:
+                reason = " ".join(parts[4:])
+            if kind not in ("user", "ip"):
+                await self._system(room, "kind must be 'user' or 'ip'")
+                return
+            self.moderation.set_ban(kind=kind, value=value, reason=reason, duration_seconds=seconds)
+            await self._system(room, f"Banned {kind}:{value}.")
+            return
+
+        if cmd == "/room":
+            if not sess.is_admin:
+                await self._system(room, "Permission denied.")
+                return
+            # /room read_only on|off ; /room allow_guests on|off
+            if len(parts) < 3:
+                await self._system(room, "Usage: /room <read_only|allow_guests> <on|off>")
+                return
+            key = parts[1].strip().lower()
+            val = parts[2].strip().lower()
+            on = val in ("on", "true", "1", "yes")
+            if key == "read_only":
+                self.moderation.set_room_settings(room, read_only=on)
+            elif key == "allow_guests":
+                self.moderation.set_room_settings(room, allow_guests=on)
+            else:
+                await self._system(room, "Unknown room setting.")
+                return
+            await self._system(room, f"Room setting updated: {key}={on}")
             return
 
         if cmd == "/agents":
@@ -585,6 +709,26 @@ class RealtimeChatServer:
             return
 
         await self._system(room, f"Unknown command: {cmd}. Try /help.")
+
+    async def _kick_by_nick(self, room: str, nick_lower: str) -> None:
+        kicked = 0
+        for ws, sess in list(self._sessions.items()):
+            if sess.room != room:
+                continue
+            if sess.sender_name.lower() == nick_lower:
+                await self._send(ws, {"type": "error", "error": "kicked"})
+                await self._disconnect(ws)
+                kicked += 1
+        await self._system(room, f"Kicked {nick_lower} ({kicked}).")
+
+    async def _mute_by_nick(self, room: str, nick_lower: str, seconds: Optional[int], reason: str) -> bool:
+        for sess in list(self._sessions.values()):
+            if sess.room != room:
+                continue
+            if sess.sender_name.lower() == nick_lower and sess.sender_id:
+                self.moderation.set_mute(user_id=sess.sender_id, room=room, reason=reason, duration_seconds=seconds)
+                return True
+        return False
 
     async def _create_tasks(self, room: str, sess: ClientSession, target: str, work: str) -> None:
         agents = self._select_agents(target)
@@ -744,6 +888,8 @@ async def run_realtime_server(consciousnesses: List[Any], port: int = 8000, swar
     site = web.TCPSite(runner, host=host, port=int(port))
     await site.start()
     logger.info(f"Realtime chat server listening on http://{host}:{port} (WS: /ws)")
+    if ENV == "prod":
+        logger.info("Realtime chat running in PROD mode (DAWN_ENV=prod)")
     return runner
 
 
