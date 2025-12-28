@@ -256,3 +256,12 @@ class TaskStore:
             )
         return events
 
+    def record_rating(self, task_id: str, *, rater_id: str, rating: int, comment: Optional[str] = None) -> TaskEvent:
+        rating = int(rating)
+        if rating < 1 or rating > 5:
+            raise ValueError("rating_must_be_1_to_5")
+        payload: Dict[str, Any] = {"rater_id": rater_id, "rating": rating}
+        if comment:
+            payload["comment"] = str(comment)[:1000]
+        return self.append_event(task_id, "rating", payload)
+

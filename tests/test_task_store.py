@@ -28,3 +28,7 @@ def test_task_store_roundtrip(tmp_path):
     assert updated.status == "completed"
     assert updated.result == "done"
 
+    store.record_rating(task.id, rater_id="user_1", rating=5, comment="nice")
+    evs2 = store.get_events(task.id)
+    assert any(e.event_type == "rating" for e in evs2)
+

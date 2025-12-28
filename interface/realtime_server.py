@@ -30,6 +30,7 @@ from .chat_store import ChatStore
 from .moderation_store import ModerationStore
 from core.orchestrator import AgentOrchestrator
 from core.task_manager import TaskStore
+from core.agent_policy import AgentPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -745,6 +746,77 @@ class RealtimeChatServer:
             for t in tasks:
                 lines.append(f"{t.id} [{t.status}] {t.title} (agent: {t.assigned_to})")
             await self._system(room, "Recent tasks:\n" + "\n".join(lines))
+            return
+
+        if cmd == "/rate":
+            # /rate <task_id> <1-5> [comment...]
+            if len(parts) < 3:
+                await self._system(room, "Usage: /rate <task_id> <1-5> [comment]")
+                return
+            task_id = parts[1].strip()
+            try:
+                rating = int(parts[2])
+            except Exception:
+                await self._system(room, "rating must be 1-5")
+                return
+            comment = " ".join(parts[3:]) if len(parts) > 3 else None
+            try:
+                self.orchestrator.task_store.record_rating(
+                    task_id,
+                    rater_id=str(sess.sender_id or f"guest:{sess.sender_name}"),
+                    rating=rating,
+                    comment=comment,
+                )
+                await self._system(room, f"Recorded rating for {task_id}: {rating}/5")
+            except Exception as e:
+                await self._system(room, f"Failed to record rating: {e}")
+            return
+
+        if cmd == "/policy":
+            # /policy <agent_id> show
+            # /policy <agent_id> set <field> <value>
+            if len(parts) < 3:
+                await self._system(room, "Usage: /policy <agent_id> show|set ...")
+                return
+            agent_id = parts[1].strip()
+            action = parts[2].strip().lower()
+            if action == "show":
+                p = self.orchestrator.policy_store.get_policy(agent_id)
+                await self._system(room, f"Policy {agent_id}: {p.to_dict()}")
+                return
+            if action == "set":
+                if not sess.is_admin:
+                    await self._system(room, "Permission denied.")
+                    return
+                if len(parts) < 5:
+                    await self._system(room, "Usage: /policy <agent_id> set <field> <value>")
+                    return
+                field = parts[3].strip()
+                value = " ".join(parts[4:]).strip()
+                cur = self.orchestrator.policy_store.get_policy(agent_id)
+                data = cur.to_dict()
+                if field not in data:
+                    await self._system(room, f"Unknown policy field: {field}")
+                    return
+                # Coerce
+                if field in ("max_plan_steps", "max_tool_calls"):
+                    data[field] = int(value)
+                elif field in ("step_timeout_seconds", "delegation_bias"):
+                    data[field] = float(value)
+                else:
+                    data[field] = value
+                newp = AgentPolicy(
+                    agent_id=cur.agent_id,
+                    max_plan_steps=int(data["max_plan_steps"]),
+                    max_tool_calls=int(data["max_tool_calls"]),
+                    step_timeout_seconds=float(data["step_timeout_seconds"]),
+                    delegation_bias=float(data["delegation_bias"]),
+                    verbosity=str(data["verbosity"]),
+                )
+                self.orchestrator.policy_store.set_policy(newp)
+                await self._system(room, f"Policy updated for {agent_id}.")
+                return
+            await self._system(room, "Usage: /policy <agent_id> show|set ...")
             return
 
         if cmd == "/task":

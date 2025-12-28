@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from core.task_manager import Task, TaskStore
+from core.agent_policy import PolicyStore, AgentPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +73,8 @@ class AgentOrchestrator:
         self.tools = ToolRegistry()
         self._register_default_tools()
 
-        # Execution limits
-        self.max_plan_steps = 8
-        self.max_tool_calls = 12
-        self.step_timeout_seconds = 30.0
+        # Per-agent policy store (used for real evolution; not cosmetic)
+        self.policy_store = PolicyStore()
 
     def set_event_sink(self, sink: OrchestratorEventSink) -> None:
         self._sink = sink
@@ -240,6 +239,8 @@ class AgentOrchestrator:
         if not task:
             return
 
+        policy = self.policy_store.get_policy(task.assigned_to)
+
         self.task_store.update_status(task.id, "running")
         self.task_store.append_event(task.id, "started", {"agent_id": task.assigned_to, "ts": time.time()})
         await self._emit({"type": "task", "event": "started", "task": self.task_store.get_task(task.id).to_dict()})
@@ -248,17 +249,17 @@ class AgentOrchestrator:
         # - ask agent to produce a JSON plan with tool calls
         # - execute tools
         # - ask agent to summarize / finalize
-        plan = await self._get_plan(agent, task)
+        plan = await self._get_plan(agent, task, policy)
         tool_calls = 0
 
-        for i, step in enumerate(plan.get("steps", [])[: self.max_plan_steps]):
+        for i, step in enumerate(plan.get("steps", [])[: max(1, policy.max_plan_steps)]):
             step_desc = str(step.get("do", f"step_{i+1}"))
             self.task_store.append_event(task.id, "progress", {"step": i + 1, "of": len(plan.get("steps", [])), "do": step_desc})
             await self._emit({"type": "task", "event": "progress", "task_id": task.id, "step": i + 1, "do": step_desc})
 
             if "tool" in step:
                 tool_calls += 1
-                if tool_calls > self.max_tool_calls:
+                if tool_calls > max(1, policy.max_tool_calls):
                     raise RuntimeError("tool_call_limit_exceeded")
                 tool_name = str(step.get("tool"))
                 tool_args = step.get("args") or {}
@@ -267,7 +268,7 @@ class AgentOrchestrator:
                 self.task_store.append_event(task.id, "tool", {"name": tool_name, "args": tool_args})
                 await self._emit({"type": "task", "event": "tool", "task_id": task.id, "name": tool_name})
                 if self.tools.has(tool_name):
-                    result = await asyncio.wait_for(self.tools.call(tool_name, tool_args), timeout=self.step_timeout_seconds)
+                    result = await asyncio.wait_for(self.tools.call(tool_name, tool_args), timeout=policy.step_timeout_seconds)
                 else:
                     result = {"ok": False, "error": f"unknown_tool:{tool_name}"}
                 self.task_store.append_event(task.id, "tool_result", {"name": tool_name, "result": result})
@@ -276,8 +277,12 @@ class AgentOrchestrator:
             # If not a tool, treat as thinking substep and ask agent to elaborate.
             try:
                 _ = await asyncio.wait_for(
-                    agent.chat(f"Task: {task.title}\nStep: {step_desc}\nDo this step now. Keep it brief; report progress.", user_id=str(task.created_by)),
-                    timeout=self.step_timeout_seconds,
+                    agent.chat(
+                        f"Task: {task.title}\nStep: {step_desc}\n"
+                        f"Policy: verbosity={policy.verbosity}. Do this step now; report progress.",
+                        user_id=str(task.created_by),
+                    ),
+                    timeout=policy.step_timeout_seconds,
                 )
             except Exception:
                 # Non-fatal; continue.
@@ -288,7 +293,7 @@ class AgentOrchestrator:
         self.task_store.append_event(task.id, "completed", {"result": final[:5000]})
         await self._emit({"type": "task", "event": "completed", "task": self.task_store.get_task(task.id).to_dict()})
 
-    async def _get_plan(self, agent: Any, task: Task) -> Dict[str, Any]:
+    async def _get_plan(self, agent: Any, task: Task, policy: AgentPolicy) -> Dict[str, Any]:
         tools = [{"name": t.name, "description": t.description, "schema": t.json_schema} for t in self.tools.specs()]
         system = (
             "You are an autonomous software agent. Produce a JSON plan only.\n"
@@ -296,7 +301,8 @@ class AgentOrchestrator:
             "- Output MUST be valid JSON.\n"
             "- Structure: {\"goal\": string, \"steps\": [{\"do\": string, \"tool\"?: string, \"args\"?: object}]}\n"
             "- Only use tools listed.\n"
-            "- Keep <= 8 steps.\n"
+            f"- Keep <= {max(1, policy.max_plan_steps)} steps.\n"
+            f"- Prefer delegation when appropriate (delegation_bias={policy.delegation_bias}).\n"
         )
         prompt = (
             f"{system}\n"
@@ -305,7 +311,7 @@ class AgentOrchestrator:
             f"Task prompt: {task.prompt}\n"
         )
         try:
-            text = await asyncio.wait_for(agent.chat(prompt, user_id=str(task.created_by)), timeout=self.step_timeout_seconds)
+            text = await asyncio.wait_for(agent.chat(prompt, user_id=str(task.created_by)), timeout=policy.step_timeout_seconds)
             plan = json.loads(text)
             if not isinstance(plan, dict):
                 raise ValueError("plan_not_object")
