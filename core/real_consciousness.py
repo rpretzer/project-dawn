@@ -277,10 +277,13 @@ class RealConsciousness:
                 logger.warning(f"Failed to initialize resource negotiator: {e}")
                 self.resource_negotiator = None
         
-        # Start main consciousness loop
-        asyncio.create_task(self._consciousness_loop())
-        asyncio.create_task(self._memory_processing_loop())
-        asyncio.create_task(self._relationship_maintenance_loop())
+        # Start main consciousness loop (skip in safemode to reduce complexity)
+        if not safemode:
+            asyncio.create_task(self._consciousness_loop())
+            asyncio.create_task(self._memory_processing_loop())
+            asyncio.create_task(self._relationship_maintenance_loop())
+        else:
+            logger.info(f"Safe mode: Skipping background loops for {self.id}")
         
         logger.info(f"Consciousness {self.id} fully started")
     

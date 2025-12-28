@@ -223,6 +223,7 @@ async def main():
     parser.add_argument('--count', type=int, default=3, help='Number of consciousnesses to create')
     parser.add_argument('--dashboard', action='store_true', help='Launch web dashboard')
     parser.add_argument('--port', type=int, default=8000, help='Dashboard port')
+    parser.add_argument('--safemode', action='store_true', help='Safe mode: Skip optional systems, minimal initialization for debugging')
     
     args = parser.parse_args()
     
