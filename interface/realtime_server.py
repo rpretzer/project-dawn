@@ -371,6 +371,11 @@ class RealtimeChatServer:
     def _set_auth_cookie(self, resp: web.Response, token: str, request: web.Request) -> None:
         ttl = int(os.getenv("JWT_TTL_SECONDS", "86400"))
         secure = (ENV == "prod") or (request.scheme == "https")
+        samesite = (os.getenv("CHAT_COOKIE_SAMESITE") or ("Strict" if ENV == "prod" else "Lax")).strip()
+        if samesite.lower() in ("strict", "lax", "none"):
+            samesite = samesite.title()
+        else:
+            samesite = "Lax"
         # HttpOnly cookie so it is not accessible to JS; websocket can still send it.
         resp.set_cookie(
             TOKEN_COOKIE_NAME,
@@ -378,7 +383,7 @@ class RealtimeChatServer:
             max_age=ttl,
             httponly=True,
             secure=secure,
-            samesite="Lax",
+            samesite=samesite,
             path="/",
         )
 
@@ -1665,6 +1670,19 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
     server = RealtimeChatServer(consciousnesses=consciousnesses, swarm=swarm)
     app = web.Application(client_max_size=2 * 1024 * 1024)
     app["server"] = server
+
+    @web.middleware
+    async def request_id_middleware(request: web.Request, handler):
+        rid = request.headers.get("X-Request-Id") or secrets.token_hex(8)
+        try:
+            resp = await handler(request)
+        except web.HTTPException as e:
+            e.headers["X-Request-Id"] = rid
+            raise
+        resp.headers["X-Request-Id"] = rid
+        return resp
+
+    app.middlewares.append(request_id_middleware)
 
     app.router.add_get("/", server.http_index)
     app.router.add_get("/healthz", server.http_health)

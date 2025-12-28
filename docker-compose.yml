@@ -1,0 +1,16 @@
+services:
+  dawn:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Sensible defaults for containerized runs
+      - CHAT_HOST=0.0.0.0
+      - DAWN_WORKSPACE_ROOT=/app
+    volumes:
+      - ./data:/app/data
+      - ./artifacts:/app/artifacts
+    restart: unless-stopped
+
