@@ -283,10 +283,13 @@ class DreamIntegration:
         stress = 0.0
         
         # Check emotional state
-        if hasattr(self.consciousness, 'emotional_state'):
+        if hasattr(self.consciousness, 'emotional_state') and self.consciousness.emotional_state:
             negative_emotions = ['fear', 'anger', 'anxiety', 'sadness']
             for emotion in negative_emotions:
-                stress += self.consciousness.emotional_state.get(emotion, 0) * 0.25
+                if isinstance(self.consciousness.emotional_state, dict):
+                    stress += self.consciousness.emotional_state.get(emotion, 0) * 0.25
+                elif hasattr(self.consciousness.emotional_state, emotion):
+                    stress += getattr(self.consciousness.emotional_state, emotion, 0) * 0.25
                 
         # Check unmet goals
         if hasattr(self.consciousness, 'goals'):

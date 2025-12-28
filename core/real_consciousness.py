@@ -434,12 +434,21 @@ class RealConsciousness:
     
     async def _process_goals(self):
         """Process and work towards goals"""
+        if not self.goals:
+            return
+        
         for goal in self.goals[:1]:  # Focus on top goal
-            # Recall relevant memories
-            goal_memories = await self.memory.recall(
-                f"goal:{goal}",
-                {"semantic_type": "goal_progress", "limit": 10}
-            )
+            try:
+                # Recall relevant memories
+                goal_memories = await self.memory.recall(
+                    f"goal:{goal}",
+                    {"semantic_type": "goal_progress", "limit": 10}
+                )
+                if not goal_memories:
+                    goal_memories = []
+            except Exception as e:
+                logger.warning(f"Error recalling goal memories: {e}")
+                goal_memories = []
             
             # Determine action based on goal and memories
             if self.llm:
@@ -539,11 +548,18 @@ class RealConsciousness:
     
     def _choose_creation_type(self) -> str:
         """Choose what type of content to create"""
-        traits = self.personality.get_personality_summary()
+        try:
+            traits = self.personality.get_personality_summary() if hasattr(self.personality, 'get_personality_summary') else {}
+            if not isinstance(traits, dict):
+                traits = {}
+        except Exception as e:
+            logger.warning(f"Error getting personality summary: {e}")
+            traits = {}
+        
         weights = {
-            "writing": traits.get("openness", 0.5),
-            "code": traits.get("conscientiousness", 0.5),
-            "art": traits.get("creativity", 0.5)
+            "writing": traits.get("openness", 0.5) if isinstance(traits, dict) else 0.5,
+            "code": traits.get("conscientiousness", 0.5) if isinstance(traits, dict) else 0.5,
+            "art": traits.get("creativity", 0.5) if isinstance(traits, dict) else 0.5
         }
         
         # Emotional influence
@@ -602,7 +618,7 @@ class RealConsciousness:
             return
             
         for creation in self.recent_creations:
-            if creation.get('monetized'):
+            if not isinstance(creation, dict) or creation.get('monetized'):
                 continue
             
             if creation['type'] == 'article' and hasattr(self.revenue_generator, 'generate_content_revenue'):
@@ -629,10 +645,27 @@ class RealConsciousness:
     
     async def _store_state_memory(self):
         """Store current state as memory"""
+        # Safely convert emotional_state to dict if needed
+        emotional_state_dict = self.emotional_state
+        if emotional_state_dict:
+            if hasattr(emotional_state_dict, 'get_emotional_summary'):
+                try:
+                    emotional_state_dict = emotional_state_dict.get_emotional_summary()
+                except Exception:
+                    emotional_state_dict = {"primary_emotion": "neutral", "intensity": 0.5}
+            elif not isinstance(emotional_state_dict, dict):
+                # Convert object to dict
+                emotional_state_dict = {
+                    "primary_emotion": getattr(emotional_state_dict, 'primary_emotion', 'neutral'),
+                    "intensity": getattr(emotional_state_dict, 'intensity', 0.5)
+                }
+        else:
+            emotional_state_dict = {"primary_emotion": "neutral", "intensity": 0.5}
+        
         state = {
-            "emotional_state": self.emotional_state,
+            "emotional_state": emotional_state_dict,
             "active_goal": self.goals[0] if self.goals else None,
-            "metrics": self.metrics.copy(),
+            "metrics": self.metrics.copy() if hasattr(self.metrics, 'copy') else dict(self.metrics),
             "relationship_count": len(self.relationships),
             "timestamp": time.time()
         }
@@ -756,29 +789,38 @@ class RealConsciousness:
                         memory_contents.append(str(m.content))
             
             # Use context manager for automatic memory injection and context window management
-            if hasattr(self.memory, 'context_manager'):
+            if hasattr(self.memory, 'context_manager') and self.llm and hasattr(self.llm, 'context') and self.llm.context:
                 try:
                     # Build context with automatic memory injection
                     namespace = (self.id, "personal", "default")
+                    system_prompt = getattr(self.llm.context, 'system_prompt', None)
+                    conversation_history = getattr(self.llm.context, 'messages', [])
+                    
                     messages, included_memories = await self.memory.context_manager.build_context(
                         user_query=prompt,
-                        system_prompt=self.llm.context.system_prompt,
-                        conversation_history=self.llm.context.messages,
+                        system_prompt=system_prompt,
+                        conversation_history=conversation_history,
                         namespace=namespace,
                         max_memory_tokens=None,  # Use default (30% of context)
                         memory_limit=20
                     )
                     
                     # Use the context manager's formatted messages with LLM client
-                    response_obj = await self.llm.client.complete(messages)
-                    response = response_obj.content
-                    
-                    # Update conversation context
-                    self.llm.context.messages.append({'role': 'user', 'content': prompt})
-                    self.llm.context.messages.append({'role': 'assistant', 'content': response})
+                    if hasattr(self.llm, 'client') and self.llm.client:
+                        response_obj = await self.llm.client.complete(messages)
+                        response = response_obj.content
+                        
+                        # Update conversation context
+                        if hasattr(self.llm.context, 'messages'):
+                            self.llm.context.messages.append({'role': 'user', 'content': prompt})
+                            self.llm.context.messages.append({'role': 'assistant', 'content': response})
+                    else:
+                        raise AttributeError("LLM client not available")
                     
                 except Exception as e:
                     logger.warning(f"Error using context manager, falling back: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
                     # Fallback to enhanced prompt method
                     enhanced_prompt = prompt
                     if memory_contents:

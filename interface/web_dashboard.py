@@ -989,9 +989,15 @@ BBS_DASHBOARD_HTML = """
             }
             
             // Display consciousnesses immediately (clear "Loading..." right away)
-            if (consciousnessList.length === 0 && (!data.consciousnesses || data.consciousnesses.length === 0)) {
-                whoContent.innerHTML = '<div class="who-item">No one here</div>';
-            } else if (consciousnessList.length > 0) {
+            // Always clear Loading state - don't leave it hanging
+            if (consciousnessList.length === 0) {
+                if (!data.consciousnesses || data.consciousnesses.length === 0) {
+                    whoContent.innerHTML = '<div class="who-item">No one here</div>';
+                } else {
+                    // Data exists but list is empty (shouldn't happen, but be safe)
+                    whoContent.innerHTML = '<div class="who-item">Loading users...</div>';
+                }
+            } else {
                 whoContent.innerHTML = consciousnessList.join('');
             }
             

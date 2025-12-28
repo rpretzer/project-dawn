@@ -31,6 +31,12 @@ class MemScheduler:
                                       memory_call: Dict[str, Any], 
                                       context: Dict[str, Any]) -> List[MemCube]:
         """Schedule and execute memory operations with intelligent transformation"""
+        # Safety checks
+        if not isinstance(memory_call, dict):
+            memory_call = {}
+        if not isinstance(context, dict):
+            context = {}
+        
         # Extract key parameters
         task_intent = memory_call.get("task_intent", "retrieve")
         temporal_scope = memory_call.get("temporal_scope")
@@ -216,6 +222,8 @@ class MemScheduler:
     
     def _extract_namespace(self, context: Dict[str, Any]) -> Tuple[str, str, str]:
         """Extract namespace from context"""
+        if not isinstance(context, dict):
+            context = {}
         return (
             context.get("consciousness_id", "system"),
             context.get("context", "default"),
