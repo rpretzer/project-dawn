@@ -20,6 +20,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
+from collections import deque, defaultdict
 
 import jwt
 from aiohttp import web, WSMsgType
@@ -115,6 +116,15 @@ class RealtimeChatServer:
         # Throttle LLM fanout
         self.max_agent_responses_per_message = int(os.getenv("MAX_AGENT_RESPONSES_PER_MESSAGE", "3"))
         self.agent_reply_timeout_seconds = float(os.getenv("AGENT_REPLY_TIMEOUT_SECONDS", "25"))
+
+        # Rate limits (public-safe defaults)
+        self.max_msgs_per_10s_human = int(os.getenv("CHAT_MAX_MSGS_PER_10S_HUMAN", "12"))
+        self.max_msgs_per_10s_guest = int(os.getenv("CHAT_MAX_MSGS_PER_10S_GUEST", "6"))
+        self._msg_rate: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))  # key -> timestamps
+
+        # Simple IP rate limit for auth endpoints (best-effort)
+        self.max_auth_per_minute = int(os.getenv("CHAT_MAX_AUTH_PER_MINUTE", "10"))
+        self._auth_rate: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))  # ip -> timestamps
 
         # Start orchestrator workers and wire event sink to broadcast to rooms
         asyncio.create_task(self.orchestrator.start())
@@ -227,7 +237,20 @@ class RealtimeChatServer:
     async def http_health(self, request: web.Request) -> web.Response:
         return _json_response({"ok": True, "ts": time.time()})
 
+    def _check_auth_rate_limit(self, ip: str) -> bool:
+        now = time.time()
+        q = self._auth_rate[ip]
+        while q and q[0] < now - 60:
+            q.popleft()
+        if len(q) >= self.max_auth_per_minute:
+            return False
+        q.append(now)
+        return True
+
     async def http_register(self, request: web.Request) -> web.Response:
+        ip = request.remote or "unknown"
+        if not self._check_auth_rate_limit(ip):
+            return _json_response({"success": False, "error": "rate_limited"}, status=429)
         try:
             data = await request.json()
         except Exception:
@@ -239,6 +262,12 @@ class RealtimeChatServer:
 
         if not username or not password:
             return _json_response({"success": False, "error": "username_and_password_required"}, status=400)
+        if len(password) < 8:
+            return _json_response({"success": False, "error": "password_too_short"}, status=400)
+        if len(username) < 3 or len(username) > 20:
+            return _json_response({"success": False, "error": "username_length_invalid"}, status=400)
+        if len(nickname) < 1 or len(nickname) > 30:
+            return _json_response({"success": False, "error": "nickname_length_invalid"}, status=400)
 
         # Hashing is handled by the caller in legacy dashboard; here we do it directly.
         import bcrypt
@@ -254,6 +283,9 @@ class RealtimeChatServer:
         return _json_response({"success": True, "token": token, "user": {"id": user_id, "username": username, "nickname": nickname}})
 
     async def http_login(self, request: web.Request) -> web.Response:
+        ip = request.remote or "unknown"
+        if not self._check_auth_rate_limit(ip):
+            return _json_response({"success": False, "error": "rate_limited"}, status=429)
         try:
             data = await request.json()
         except Exception:
@@ -383,6 +415,18 @@ class RealtimeChatServer:
     async def _handle_chat(self, sess: ClientSession, room: str, content: str) -> None:
         if not content:
             return
+
+        # Per-sender rate limit
+        key = sess.sender_id if sess.sender_id else f"guest:{sess.sender_name}"
+        now = time.time()
+        q = self._msg_rate[key]
+        while q and q[0] < now - 10:
+            q.popleft()
+        limit = self.max_msgs_per_10s_human if sess.sender_type == "human" else self.max_msgs_per_10s_guest
+        if len(q) >= limit:
+            await self._send(sess.ws, {"type": "error", "error": "rate_limited"})
+            return
+        q.append(now)
 
         ts = time.time()
         if _is_command(content):
@@ -609,6 +653,16 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
     app.router.add_post("/api/register", server.http_register)
     app.router.add_post("/api/login", server.http_login)
     app.router.add_get("/ws", server.ws_handler)
+
+    async def _on_cleanup(app_: web.Application) -> None:
+        # Stop orchestrator workers cleanly
+        srv: RealtimeChatServer = app_["server"]
+        try:
+            await srv.orchestrator.stop()
+        except Exception:
+            pass
+
+    app.on_cleanup.append(_on_cleanup)
 
     return app
 

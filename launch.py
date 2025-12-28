@@ -17,9 +17,6 @@ import signal
 sys.path.append(str(Path(__file__).parent))
 
 from core.real_consciousness import RealConsciousness, ConsciousnessConfig
-from core.dream_integration import enhance_consciousness_with_dreams
-from core.evolution_integration import integrate_evolution_with_swarm
-from core.knowledge_integration import integrate_knowledge_with_swarm
 from systems.intelligence.llm_integration import LLMConfig
 try:
     from interface.web_dashboard import run_dashboard
@@ -56,7 +53,11 @@ class ConsciousnessSwarm:
         
         # Add dream system (skip in safemode)
         if not safemode:
-            await enhance_consciousness_with_dreams(consciousness)
+            try:
+                from core.dream_integration import enhance_consciousness_with_dreams
+                await enhance_consciousness_with_dreams(consciousness)
+            except Exception as e:
+                logger.warning(f"Dream system failed (non-fatal): {e}")
         
         self.consciousnesses.append(consciousness)
         
@@ -112,6 +113,7 @@ class ConsciousnessSwarm:
             
         # Initialize evolution system
         try:
+            from core.evolution_integration import integrate_evolution_with_swarm
             self.evolution = integrate_evolution_with_swarm(self)
             await self.evolution.start()
         except Exception as e:
@@ -119,6 +121,7 @@ class ConsciousnessSwarm:
         
         # Initialize knowledge graph
         try:
+            from core.knowledge_integration import integrate_knowledge_with_swarm
             self.knowledge = integrate_knowledge_with_swarm(self)
             await self.knowledge.start()
         except Exception as e:
