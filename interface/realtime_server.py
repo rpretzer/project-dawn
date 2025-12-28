@@ -941,6 +941,20 @@ class RealtimeChatServer:
             await self._send(ws, {"type": "git_diff", "result": res, "ts": time.time()})
             return
 
+        if msg_type == "get_audit":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            try:
+                limit = int(payload.get("limit") or 100)
+            except Exception:
+                limit = 100
+            room = payload.get("room")
+            room_s = _sanitize_room(room) if room else None
+            events = self.moderation.list_events(limit=limit, room=room_s)
+            await self._send(ws, {"type": "audit_events", "events": events, "ts": time.time()})
+            return
+
         if msg_type == "check_patch":
             if not sess.is_admin:
                 await self._send(ws, {"type": "error", "error": "permission_denied"})
@@ -1897,6 +1911,13 @@ _INDEX_HTML = r"""<!doctype html>
         <input id="repo-diff-path" placeholder="e.g. artifacts/ or core/orchestrator.py" style="width:100%; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
         <div id="repo-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
         <div class="sep"></div>
+        <div><strong>Audit (admin)</strong></div>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="audit-refresh" class="miniBtn">refresh</button>
+          <button id="audit-room" class="miniBtn">this room</button>
+        </div>
+        <div id="audit-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
+        <div class="sep"></div>
         <div><strong>New Task</strong></div>
         <div class="hint">Assign to:</div>
         <select id="task-target">
@@ -1967,6 +1988,9 @@ _INDEX_HTML = r"""<!doctype html>
     const repoDiffBtn = document.getElementById('repo-diff');
     const repoDiffPathEl = document.getElementById('repo-diff-path');
     const repoOutEl = document.getElementById('repo-out');
+    const auditRefreshBtn = document.getElementById('audit-refresh');
+    const auditRoomBtn = document.getElementById('audit-room');
+    const auditOutEl = document.getElementById('audit-out');
     const patchCheckBtn = document.getElementById('patch-check');
     const patchApplyBtn = document.getElementById('patch-apply');
     const patchOutEl = document.getElementById('patch-out');
@@ -2297,6 +2321,19 @@ _INDEX_HTML = r"""<!doctype html>
           repoOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '');
           return;
         }
+        if (msg.type === 'audit_events') {
+          const evs = msg.events || [];
+          const lines = [];
+          for (const e of evs.slice(0, 200)) {
+            const who = e.actor_name || e.actor_user_id || 'unknown';
+            const where = e.room ? ` room=${e.room}` : '';
+            const tgt = e.target ? ` target=${e.target}` : '';
+            const reason = e.reason ? ` reason=${e.reason}` : '';
+            lines.push(`#${e.id} ${e.action} by=${who}${where}${tgt}${reason}`);
+          }
+          auditOutEl.textContent = lines.join('\\n') || '—';
+          return;
+        }
         if (msg.type === 'rated') {
           if (selectedTaskId) {
             try { ws?.send(JSON.stringify({type:'get_task', task_id: selectedTaskId})); } catch {}
@@ -2349,6 +2386,15 @@ _INDEX_HTML = r"""<!doctype html>
       if (!p) { repoOutEl.textContent = 'Provide a diff path first.'; return; }
       repoOutEl.textContent = 'Loading git diff…';
       try { ws?.send(JSON.stringify({type:'get_git_diff', path: p, staged:false})); } catch {}
+    };
+
+    auditRefreshBtn.onclick = () => {
+      auditOutEl.textContent = 'Loading audit…';
+      try { ws?.send(JSON.stringify({type:'get_audit', limit: 100})); } catch {}
+    };
+    auditRoomBtn.onclick = () => {
+      auditOutEl.textContent = 'Loading room audit…';
+      try { ws?.send(JSON.stringify({type:'get_audit', limit: 100, room})); } catch {}
     };
 
     patchCheckBtn.onclick = () => {

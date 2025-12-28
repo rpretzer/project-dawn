@@ -136,6 +136,55 @@ class ModerationStore:
             )
             conn.commit()
 
+    def list_events(self, *, limit: int = 100, room: Optional[str] = None) -> list[Dict[str, Any]]:
+        """
+        Return recent moderation events (includes patch audit actions).
+        """
+        limit = max(1, min(int(limit), 500))
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if room:
+                rows = list(
+                    conn.execute(
+                        """
+                        SELECT id, action, actor_user_id, actor_name, actor_ip, room, target, reason, created_at_ts
+                        FROM moderation_events
+                        WHERE room = ?
+                        ORDER BY created_at_ts DESC, id DESC
+                        LIMIT ?
+                        """,
+                        (str(room), limit),
+                    ).fetchall()
+                )
+            else:
+                rows = list(
+                    conn.execute(
+                        """
+                        SELECT id, action, actor_user_id, actor_name, actor_ip, room, target, reason, created_at_ts
+                        FROM moderation_events
+                        ORDER BY created_at_ts DESC, id DESC
+                        LIMIT ?
+                        """,
+                        (limit,),
+                    ).fetchall()
+                )
+        out: list[Dict[str, Any]] = []
+        for r in rows:
+            out.append(
+                {
+                    "id": int(r["id"]),
+                    "action": str(r["action"]),
+                    "actor_user_id": (str(r["actor_user_id"]) if r["actor_user_id"] is not None else None),
+                    "actor_name": (str(r["actor_name"]) if r["actor_name"] is not None else None),
+                    "actor_ip": (str(r["actor_ip"]) if r["actor_ip"] is not None else None),
+                    "room": (str(r["room"]) if r["room"] is not None else None),
+                    "target": (str(r["target"]) if r["target"] is not None else None),
+                    "reason": (str(r["reason"]) if r["reason"] is not None else None),
+                    "created_at_ts": float(r["created_at_ts"]),
+                }
+            )
+        return out
+
     def get_room_settings(self, room: str) -> Dict[str, Any]:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
