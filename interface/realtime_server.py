@@ -18,6 +18,7 @@ import logging
 import os
 import secrets
 import time
+import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import deque, defaultdict
@@ -171,6 +172,24 @@ def _git_diff_prefixes() -> List[str]:
         prefs.append(p)
     return prefs or ["artifacts/"]
 
+def _patch_apply_prefixes() -> List[str]:
+    """
+    Allowed prefixes for patch artifacts that can be applied via the UI.
+    Default: artifacts/ only.
+    """
+    raw = (os.getenv("CHAT_PATCH_APPLY_PREFIXES") or "artifacts/").strip()
+    prefs = []
+    for p in raw.split(","):
+        p = p.strip()
+        if not p:
+            continue
+        if p.startswith("/"):
+            p = p.lstrip("/")
+        if not p.endswith("/"):
+            p = p + "/"
+        prefs.append(p)
+    return prefs or ["artifacts/"]
+
 
 def _normalize_rel_path(path: str) -> str:
     p = (path or "").strip().replace("\\", "/")
@@ -301,6 +320,7 @@ class RealtimeChatServer:
         self.workspace_root = Path(os.getenv("DAWN_WORKSPACE_ROOT", "/workspace")).resolve()
         self.file_read_prefixes = _file_read_prefixes()
         self.git_diff_prefixes = _git_diff_prefixes()
+        self.patch_apply_prefixes = _patch_apply_prefixes()
 
         # Optional: automatic evolution loop (safe: uses experiments + rollback).
         self.auto_evolution_enabled = os.getenv("AUTO_EVOLUTION", "false").lower() == "true"
@@ -881,6 +901,97 @@ class RealtimeChatServer:
             staged = bool(payload.get("staged", False))
             res = _git_diff(self.workspace_root, staged=staged, path=path).to_dict()
             await self._send(ws, {"type": "git_diff", "result": res, "ts": time.time()})
+            return
+
+        if msg_type == "check_patch":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            patch_path = str(payload.get("patch_path") or "").strip()
+            if not patch_path:
+                await self._send(ws, {"type": "error", "error": "patch_path_required"})
+                return
+            if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            try:
+                read_res = _read_text_file(self.workspace_root, patch_path, max_bytes=500_000)
+                if not read_res.get("ok"):
+                    await self._send(ws, {"type": "error", "error": read_res.get("error") or "read_failed"})
+                    return
+                patch_text = str(read_res.get("content") or "")
+                proc = subprocess.run(
+                    ["git", "apply", "--check", "--whitespace=nowarn"],
+                    cwd=str(self.workspace_root),
+                    input=patch_text.encode("utf-8"),
+                    capture_output=True,
+                    timeout=8.0,
+                    check=False,
+                )
+                out = (proc.stdout or b"").decode("utf-8", errors="replace")
+                err = (proc.stderr or b"").decode("utf-8", errors="replace")
+                await self._send(
+                    ws,
+                    {
+                        "type": "patch_check",
+                        "ok": proc.returncode == 0,
+                        "patch_path": patch_path,
+                        "exit_code": int(proc.returncode),
+                        "stdout": out[:20000],
+                        "stderr": err[:20000],
+                        "truncated": (len(out) > 20000 or len(err) > 20000),
+                        "ts": time.time(),
+                    },
+                )
+            except Exception as e:
+                await self._send(ws, {"type": "patch_check", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
+            return
+
+        if msg_type == "apply_patch":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            patch_path = str(payload.get("patch_path") or "").strip()
+            if not patch_path:
+                await self._send(ws, {"type": "error", "error": "patch_path_required"})
+                return
+            if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            try:
+                read_res = _read_text_file(self.workspace_root, patch_path, max_bytes=500_000)
+                if not read_res.get("ok"):
+                    await self._send(ws, {"type": "error", "error": read_res.get("error") or "read_failed"})
+                    return
+                patch_text = str(read_res.get("content") or "")
+                proc = subprocess.run(
+                    ["git", "apply", "--whitespace=nowarn"],
+                    cwd=str(self.workspace_root),
+                    input=patch_text.encode("utf-8"),
+                    capture_output=True,
+                    timeout=8.0,
+                    check=False,
+                )
+                out = (proc.stdout or b"").decode("utf-8", errors="replace")
+                err = (proc.stderr or b"").decode("utf-8", errors="replace")
+                await self._send(
+                    ws,
+                    {
+                        "type": "patch_applied",
+                        "ok": proc.returncode == 0,
+                        "patch_path": patch_path,
+                        "exit_code": int(proc.returncode),
+                        "stdout": out[:20000],
+                        "stderr": err[:20000],
+                        "truncated": (len(out) > 20000 or len(err) > 20000),
+                        "ts": time.time(),
+                    },
+                )
+                # If applied successfully, broadcast updated tasks list (and repo status stays manual).
+                if proc.returncode == 0:
+                    await self._system(sess.room, f"Applied patch: {patch_path}")
+            except Exception as e:
+                await self._send(ws, {"type": "patch_applied", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
             return
 
         await self._send(ws, {"type": "error", "error": "unknown_message_type"})
@@ -1578,6 +1689,8 @@ _INDEX_HTML = r"""<!doctype html>
     select { width: 100%; padding: 6px; border:1px solid #0f0; background:#000; color:#0f0; }
     .miniBtn { padding: 4px 6px; border:1px solid #0f0; background:#001100; color:#0f0; cursor:pointer; font-size: 11px; }
     .miniBtn:hover { border-color:#0ff; color:#0ff; }
+    .dangerBtn { border-color:#f00; color:#f88; }
+    .dangerBtn:hover { border-color:#f55; color:#fdd; }
     a { color:#0ff; }
   </style>
 </head>
@@ -1610,6 +1723,11 @@ _INDEX_HTML = r"""<!doctype html>
         <div><strong>Artifacts</strong></div>
         <div id="artifacts" class="hint">—</div>
         <div id="file-viewer" class="hint"> </div>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="patch-check" class="miniBtn">check patch</button>
+          <button id="patch-apply" class="miniBtn dangerBtn">apply patch</button>
+        </div>
+        <div id="patch-out" class="hint" style="white-space:pre-wrap; word-break:break-word; border:1px dashed #0f0; padding:8px; margin-top:6px;"> </div>
         <div class="sep"></div>
         <div><strong>Repo (admin)</strong></div>
         <div style="margin-top:6px; display:flex; gap:8px;">
@@ -1690,6 +1808,9 @@ _INDEX_HTML = r"""<!doctype html>
     const repoDiffBtn = document.getElementById('repo-diff');
     const repoDiffPathEl = document.getElementById('repo-diff-path');
     const repoOutEl = document.getElementById('repo-out');
+    const patchCheckBtn = document.getElementById('patch-check');
+    const patchApplyBtn = document.getElementById('patch-apply');
+    const patchOutEl = document.getElementById('patch-out');
 
     const msgEl = document.getElementById('msg');
     const sendBtn = document.getElementById('send');
@@ -1711,6 +1832,7 @@ _INDEX_HTML = r"""<!doctype html>
     let selectedTaskId = null;
     let selectedTaskDetail = null; // {task, events, artifacts}
     let agents = [];
+    let selectedFilePath = null;
 
     function fmtTs(ts) {
       try { return new Date(ts * 1000).toLocaleTimeString([], {hour12:false}); } catch { return ''; }
@@ -1817,6 +1939,7 @@ _INDEX_HTML = r"""<!doctype html>
         pathEl.style.flex = '1';
         pathEl.textContent = p;
         pathEl.onclick = () => {
+          selectedFilePath = p;
           fileViewerEl.textContent = 'Loading file…';
           try { ws?.send(JSON.stringify({type:'get_file', path: p, max_bytes: 120000})); } catch {}
         };
@@ -1917,6 +2040,8 @@ _INDEX_HTML = r"""<!doctype html>
       taskDetailEl.textContent = ' ';
       artifactsEl.textContent = '—';
       fileViewerEl.textContent = ' ';
+      patchOutEl.textContent = ' ';
+      selectedFilePath = null;
       repoOutEl.textContent = ' ';
       selectedTaskDetail = null;
 
@@ -1936,6 +2061,8 @@ _INDEX_HTML = r"""<!doctype html>
           artifacts = [];
           renderArtifacts();
           fileViewerEl.textContent = ' ';
+          patchOutEl.textContent = ' ';
+          selectedFilePath = null;
           repoOutEl.textContent = ' ';
           selectedTaskDetail = null;
           return;
@@ -1985,6 +2112,14 @@ _INDEX_HTML = r"""<!doctype html>
         if (msg.type === 'file') {
           const header = `[${msg.path}]${msg.truncated ? ' (truncated)' : ''}\\n\\n`;
           fileViewerEl.textContent = header + (msg.content || '');
+          return;
+        }
+        if (msg.type === 'patch_check' || msg.type === 'patch_applied') {
+          const head = `${msg.type} ${msg.ok ? 'OK' : 'FAIL'} (exit=${msg.exit_code ?? 'n/a'})\\n`;
+          const out = (msg.stdout || '').trim();
+          const err = (msg.stderr || '').trim();
+          const extra = msg.error ? (`\\nerror: ${msg.error}`) : '';
+          patchOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '') + extra;
           return;
         }
         if (msg.type === 'git_status' || msg.type === 'git_diff') {
@@ -2047,6 +2182,23 @@ _INDEX_HTML = r"""<!doctype html>
       if (!p) { repoOutEl.textContent = 'Provide a diff path first.'; return; }
       repoOutEl.textContent = 'Loading git diff…';
       try { ws?.send(JSON.stringify({type:'get_git_diff', path: p, staged:false})); } catch {}
+    };
+
+    patchCheckBtn.onclick = () => {
+      if (!selectedFilePath || !selectedFilePath.endsWith('.patch')) {
+        patchOutEl.textContent = 'Select a .patch artifact file first.';
+        return;
+      }
+      patchOutEl.textContent = 'Checking patch…';
+      try { ws?.send(JSON.stringify({type:'check_patch', patch_path: selectedFilePath})); } catch {}
+    };
+    patchApplyBtn.onclick = () => {
+      if (!selectedFilePath || !selectedFilePath.endsWith('.patch')) {
+        patchOutEl.textContent = 'Select a .patch artifact file first.';
+        return;
+      }
+      patchOutEl.textContent = 'Applying patch…';
+      try { ws?.send(JSON.stringify({type:'apply_patch', patch_path: selectedFilePath})); } catch {}
     };
 
     connect();

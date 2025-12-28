@@ -31,6 +31,7 @@ def test_fs_apply_patch_check_and_apply(tmp_path: Path, monkeypatch) -> None:
 
     # Allow patching core/ in this test repo.
     monkeypatch.setenv("DAWN_PATCH_PREFIXES", "core/")
+    monkeypatch.setenv("DAWN_ALLOW_AGENT_PATCH_APPLY", "true")
 
     ts = TaskStore(db_path=tmp_path / "tasks.db")
     orch = AgentOrchestrator(agents=[_DummyAgent()], task_store=ts, workspace_root=tmp_path)
@@ -74,6 +75,33 @@ new file mode 100644
         res = await orch.tools.call("fs_apply_patch", {"patch": patch, "check_only": True})
         assert res["ok"] is False
         assert res["error"] == "path_not_allowed"
+
+    asyncio.run(run())
+
+
+def test_fs_apply_patch_apply_disabled_by_default(tmp_path: Path, monkeypatch) -> None:
+    _run(["git", "init"], tmp_path)
+    monkeypatch.setenv("DAWN_PATCH_PREFIXES", "core/")
+    monkeypatch.delenv("DAWN_ALLOW_AGENT_PATCH_APPLY", raising=False)
+    (tmp_path / "core").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "core" / "x.txt").write_text("hello\n", encoding="utf-8")
+
+    ts = TaskStore(db_path=tmp_path / "tasks.db")
+    orch = AgentOrchestrator(agents=[_DummyAgent()], task_store=ts, workspace_root=tmp_path)
+
+    patch = """diff --git a/core/x.txt b/core/x.txt
+index 3b18e51..2c2b0b9 100644
+--- a/core/x.txt
++++ b/core/x.txt
+@@ -1 +1 @@
+-hello
++hello world
+"""
+
+    async def run() -> None:
+        res = await orch.tools.call("fs_apply_patch", {"patch": patch, "check_only": False})
+        assert res["ok"] is False
+        assert res["error"] == "apply_disabled"
 
     asyncio.run(run())
 

@@ -333,11 +333,14 @@ class AgentOrchestrator:
             patch = args.get("patch")
             check_only = bool(args.get("check_only", False))
             max_files = int(args.get("max_files", 25))
+            allow_apply = (os.getenv("DAWN_ALLOW_AGENT_PATCH_APPLY", "false").lower() == "true")
             if not isinstance(patch, str):
                 return {"ok": False, "error": "patch_must_be_string"}
             if len(patch) > 500_000:
                 return {"ok": False, "error": "patch_too_large"}
             max_files = max(1, min(max_files, 200))
+            if not check_only and not allow_apply:
+                return {"ok": False, "error": "apply_disabled", "hint": "set DAWN_ALLOW_AGENT_PATCH_APPLY=true to allow agents to apply patches directly"}
 
             paths = _extract_patch_paths(patch)
             if not paths:
@@ -732,7 +735,8 @@ class AgentOrchestrator:
             "- If you need to inspect repo state, use fs_list/fs_read.\n"
             "- If you need to reference external docs, use http_get/http_get_json (host allowlist applies).\n"
             "- If you need to summarize changes you made, use git_status and git_diff (read-only).\n"
-            "- If you need to propose or apply code changes spanning multiple hunks/files, prefer fs_apply_patch (unified diff) and run it with check_only=true first.\n"
+            "- If you need to propose code changes spanning multiple hunks/files, prefer fs_apply_patch (unified diff) and run it with check_only=true first.\n"
+            "- IMPORTANT: by default you should NOT apply patches; write the patch to artifacts/<task_id>/change.patch and ask for approval.\n"
         )
         prompt = (
             f"{system}\n"
