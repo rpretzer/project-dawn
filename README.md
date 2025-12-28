@@ -4,6 +4,8 @@
 
 Project Dawn is a framework for running multiple LLM-backed **agents** with persistent memory and a real-time multi-user chat interface. It is designed for collaborative “ideas → tasks → delegated work → results” workflows (humans and agents together).
 
+See `ROADMAP.md` for planned feature work and milestones.
+
 ## Features
 
 - **Agent runtime**: Multiple autonomous agents with background loops and persistent state
