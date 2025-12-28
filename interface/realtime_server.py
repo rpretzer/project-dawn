@@ -188,7 +188,7 @@ class RealtimeChatServer:
             if event.get("type") != "task":
                 return
             ev = str(event.get("event"))
-            if ev in ("started", "completed"):
+            if ev == "started":
                 task = event.get("task") or {}
                 room = str(task.get("room") or DEFAULT_ROOM)
                 task_id = str(task.get("id") or "")
@@ -196,6 +196,36 @@ class RealtimeChatServer:
                 assigned_to = str(task.get("assigned_to") or "")
                 title = str(task.get("title") or "")
                 await self._system(room, f"[task {task_id}] {status} — {title} (agent: {assigned_to})")
+                return
+            if ev == "completed":
+                task = event.get("task") or {}
+                room = str(task.get("room") or DEFAULT_ROOM)
+                task_id = str(task.get("id") or "")
+                assigned_to = str(task.get("assigned_to") or "")
+                title = str(task.get("title") or "")
+                result = str(task.get("result") or "").strip()
+                await self._system(room, f"[task {task_id}] completed — {title} (agent: {assigned_to})")
+                if result:
+                    # Also emit the actual deliverable into the chat stream as an agent message.
+                    agent_name = self._agent_name(assigned_to)
+                    m = self.chat_store.append_message(
+                        room=room,
+                        sender_type="agent",
+                        sender_id=assigned_to or None,
+                        sender_name=agent_name,
+                        content=_truncate_message(f"[task {task_id} result]\n{result}", limit=8000),
+                        created_at_ts=time.time(),
+                    )
+                    await self._broadcast(room, {"type": "message", "message": m.to_dict()})
+                return
+            if ev == "failed":
+                task = event.get("task") or {}
+                room = str(task.get("room") or DEFAULT_ROOM)
+                task_id = str(task.get("id") or "")
+                assigned_to = str(task.get("assigned_to") or "")
+                title = str(task.get("title") or "")
+                err = str(task.get("error") or "failed")
+                await self._system(room, f"[task {task_id}] failed — {title} (agent: {assigned_to})\n{err}")
                 return
             if ev == "progress":
                 task_id = str(event.get("task_id") or "")
@@ -214,6 +244,14 @@ class RealtimeChatServer:
                 return
         except Exception:
             return
+
+    def _agent_name(self, agent_id: str) -> str:
+        aid = (agent_id or "").strip()
+        for c in self.consciousnesses:
+            cid = str(getattr(c, "id", "") or "")
+            if cid == aid:
+                return str(getattr(c, "name", cid or "Agent"))
+        return aid or "Agent"
 
     def _room_sockets(self, room: str) -> Set[web.WebSocketResponse]:
         if room not in self._rooms:
@@ -779,14 +817,55 @@ class RealtimeChatServer:
         if cmd == "/policy":
             # /policy <agent_id> show
             # /policy <agent_id> set <field> <value>
+            # /policy <agent_id> history [n]
+            # /policy <agent_id> rollback <history_id>
             if len(parts) < 3:
-                await self._system(room, "Usage: /policy <agent_id> show|set ...")
+                await self._system(room, "Usage: /policy <agent_id> show|set|history|rollback ...")
                 return
             agent_id = parts[1].strip()
             action = parts[2].strip().lower()
             if action == "show":
                 p = self.orchestrator.policy_store.get_policy(agent_id)
                 await self._system(room, f"Policy {agent_id}: {p.to_dict()}")
+                return
+            if action == "history":
+                n = 10
+                if len(parts) >= 4:
+                    try:
+                        n = max(1, min(int(parts[3]), 50))
+                    except Exception:
+                        n = 10
+                hist = self.orchestrator.policy_store.list_history(agent_id, limit=n)
+                if not hist:
+                    await self._system(room, f"No policy history for {agent_id}.")
+                    return
+                lines = []
+                for h in hist:
+                    pid = h["id"]
+                    pol = h.get("policy") or {}
+                    lines.append(
+                        f"id={pid} steps={pol.get('max_plan_steps')} tools={pol.get('max_tool_calls')} "
+                        f"timeout={pol.get('step_timeout_seconds')} delegation={pol.get('delegation_bias')} verbosity={pol.get('verbosity')}"
+                    )
+                await self._system(room, "Policy history:\n" + "\n".join(lines))
+                return
+            if action == "rollback":
+                if not sess.is_admin:
+                    await self._system(room, "Permission denied.")
+                    return
+                if len(parts) < 4:
+                    await self._system(room, "Usage: /policy <agent_id> rollback <history_id>")
+                    return
+                try:
+                    hid = int(parts[3])
+                except Exception:
+                    await self._system(room, "history_id must be an integer")
+                    return
+                try:
+                    p = self.orchestrator.policy_store.rollback_to_history_id(agent_id, hid)
+                    await self._system(room, f"Rolled back policy for {agent_id}: {p.to_dict()}")
+                except Exception as e:
+                    await self._system(room, f"Rollback failed: {e}")
                 return
             if action == "set":
                 if not sess.is_admin:
