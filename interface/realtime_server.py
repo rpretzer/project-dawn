@@ -364,8 +364,11 @@ class RealtimeChatServer:
         origin = request.headers.get("Origin")
         if not origin:
             return True  # non-browser clients
+
+        # In prod, you generally want an explicit allowlist for browser Origins.
+        require_allowlist = (os.getenv("CHAT_REQUIRE_ORIGIN_ALLOWLIST") or "true").lower() == "true"
         if not self._origins:
-            return True  # no allowlist configured
+            return not require_allowlist
         return origin in self._origins
 
     def _set_auth_cookie(self, resp: web.Response, token: str, request: web.Request) -> None:
@@ -1683,6 +1686,38 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
         return resp
 
     app.middlewares.append(request_id_middleware)
+
+    @web.middleware
+    async def security_headers_middleware(request: web.Request, handler):
+        resp = await handler(request)
+        # Basic hardening headers
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+
+        # CSP: the built-in UI uses inline CSS/JS; keep it self-contained.
+        # You can override this via CHAT_CSP if you serve your own UI.
+        csp = (os.getenv("CHAT_CSP") or "").strip()
+        if not csp:
+            csp = (
+                "default-src 'self'; "
+                "connect-src 'self' ws: wss:; "
+                "img-src 'self' data:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "script-src 'self' 'unsafe-inline'"
+            )
+        resp.headers.setdefault("Content-Security-Policy", csp)
+
+        # HSTS only when served over HTTPS (or behind a proxy that sets X-Forwarded-Proto).
+        if ENV == "prod":
+            proto = (request.headers.get("X-Forwarded-Proto") or request.scheme or "").lower()
+            if proto == "https":
+                resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+        return resp
+
+    app.middlewares.append(security_headers_middleware)
 
     app.router.add_get("/", server.http_index)
     app.router.add_get("/healthz", server.http_health)
