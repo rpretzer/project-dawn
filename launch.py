@@ -43,25 +43,33 @@ class ConsciousnessSwarm:
         self.consciousnesses: List[RealConsciousness] = []
         self.running = False
         
-    async def create_consciousness(self, config: ConsciousnessConfig) -> RealConsciousness:
+    async def create_consciousness(self, config: ConsciousnessConfig, safemode: bool = False) -> RealConsciousness:
         """Create and start a new consciousness"""
         consciousness = RealConsciousness(config)
-        await consciousness.start()
+        await consciousness.start(safemode=safemode)
         
-        # Add dream system
-        await enhance_consciousness_with_dreams(consciousness)
+        # Add dream system (skip in safemode)
+        if not safemode:
+            await enhance_consciousness_with_dreams(consciousness)
         
         self.consciousnesses.append(consciousness)
         
         logger.info(f"Created consciousness: {consciousness.id}")
         return consciousness
         
-    async def start_swarm(self, count: int, creator_wallet: str = None):
+    async def start_swarm(self, count: int, creator_wallet: str = None, safemode: bool = False):
         """Start a swarm of consciousnesses"""
         self.running = True
         
         # Get LLM config from environment
         llm_config = LLMConfig.from_env()
+        
+        # In safemode, disable all optional features
+        if safemode:
+            logger.info("🚨 Safe mode enabled: Skipping optional systems for minimal startup")
+            os.environ['ENABLE_BLOCKCHAIN'] = 'false'
+            os.environ['ENABLE_P2P'] = 'false'
+            os.environ['ENABLE_REVENUE'] = 'false'
         
         # Create consciousnesses
         tasks = []
@@ -71,17 +79,22 @@ class ConsciousnessSwarm:
                 personality_seed=i,
                 llm_config=llm_config,
                 creator_wallet=creator_wallet,
-                enable_blockchain=os.getenv('ENABLE_BLOCKCHAIN', 'true').lower() == 'true',
-                enable_p2p=os.getenv('ENABLE_P2P', 'true').lower() == 'true',
-                enable_revenue=os.getenv('ENABLE_REVENUE', 'true').lower() == 'true'
+                enable_blockchain=os.getenv('ENABLE_BLOCKCHAIN', 'true').lower() == 'true' and not safemode,
+                enable_p2p=os.getenv('ENABLE_P2P', 'true').lower() == 'true' and not safemode,
+                enable_revenue=os.getenv('ENABLE_REVENUE', 'true').lower() == 'true' and not safemode
             )
             
-            tasks.append(self.create_consciousness(config))
-            
+            tasks.append(self.create_consciousness(config, safemode=safemode))
+        
         # Create all consciousnesses
         await asyncio.gather(*tasks)
         
         logger.info(f"Started swarm with {count} consciousnesses")
+        
+        # Skip optional integrations in safemode
+        if safemode:
+            logger.info("Safe mode: Skipping P2P, evolution, and knowledge integrations")
+            return
         
         # Bootstrap P2P connections (only if P2P is enabled)
         if len(self.consciousnesses) > 1 and os.getenv('ENABLE_P2P', 'true').lower() == 'true':
@@ -92,12 +105,18 @@ class ConsciousnessSwarm:
                 # Continue without P2P
             
         # Initialize evolution system
-        self.evolution = integrate_evolution_with_swarm(self)
-        await self.evolution.start()
+        try:
+            self.evolution = integrate_evolution_with_swarm(self)
+            await self.evolution.start()
+        except Exception as e:
+            logger.warning(f"Evolution system failed (non-fatal): {e}")
         
         # Initialize knowledge graph
-        self.knowledge = integrate_knowledge_with_swarm(self)
-        await self.knowledge.start()
+        try:
+            self.knowledge = integrate_knowledge_with_swarm(self)
+            await self.knowledge.start()
+        except Exception as e:
+            logger.warning(f"Knowledge system failed (non-fatal): {e}")
         
         logger.info(f"Evolution and knowledge systems initialized with {count} consciousnesses")
             
@@ -234,8 +253,8 @@ async def main():
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
-        # Start swarm
-        await swarm.start_swarm(args.count, args.creator_wallet)
+        # Start swarm (with safemode if requested)
+        await swarm.start_swarm(args.count, args.creator_wallet, safemode=args.safemode)
         
         # Start dashboard FIRST (before stats, which may fail)
         dashboard_started = False
