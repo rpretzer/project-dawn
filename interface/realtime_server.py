@@ -263,6 +263,10 @@ def _read_text_file(root: Path, rel_path: str, *, max_bytes: int = 100_000) -> D
     text = data.decode("utf-8", errors="replace")
     return {"ok": True, "path": str(p.relative_to(root)), "content": text, "truncated": truncated}
 
+def _is_patch_artifact_path(path: str) -> bool:
+    p = _normalize_rel_path(path)
+    return bool(p) and p.endswith(".patch")
+
 
 def _git_apply_stat(*, repo_root: Path, patch_text: str) -> Dict[str, Any]:
     """
@@ -945,6 +949,9 @@ class RealtimeChatServer:
             if not patch_path:
                 await self._send(ws, {"type": "error", "error": "patch_path_required"})
                 return
+            if not _is_patch_artifact_path(patch_path):
+                await self._send(ws, {"type": "error", "error": "patch_must_end_with_dot_patch"})
+                return
             if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
                 await self._send(ws, {"type": "error", "error": "path_not_allowed"})
                 return
@@ -964,6 +971,18 @@ class RealtimeChatServer:
                 )
                 out = (proc.stdout or b"").decode("utf-8", errors="replace")
                 err = (proc.stderr or b"").decode("utf-8", errors="replace")
+                try:
+                    self.moderation.audit(
+                        action="patch_check",
+                        actor_user_id=sess.sender_id,
+                        actor_name=sess.sender_name,
+                        actor_ip=sess.ip,
+                        room=sess.room,
+                        target=patch_path,
+                        reason=f"ok={proc.returncode == 0} exit={proc.returncode}",
+                    )
+                except Exception:
+                    pass
                 await self._send(
                     ws,
                     {
@@ -989,6 +1008,9 @@ class RealtimeChatServer:
             if not patch_path:
                 await self._send(ws, {"type": "error", "error": "patch_path_required"})
                 return
+            if not _is_patch_artifact_path(patch_path):
+                await self._send(ws, {"type": "error", "error": "patch_must_end_with_dot_patch"})
+                return
             if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
                 await self._send(ws, {"type": "error", "error": "path_not_allowed"})
                 return
@@ -999,6 +1021,18 @@ class RealtimeChatServer:
                     return
                 patch_text = str(read_res.get("content") or "")
                 stat = _git_apply_stat(repo_root=self.workspace_root, patch_text=patch_text)
+                try:
+                    self.moderation.audit(
+                        action="patch_stat",
+                        actor_user_id=sess.sender_id,
+                        actor_name=sess.sender_name,
+                        actor_ip=sess.ip,
+                        room=sess.room,
+                        target=patch_path,
+                        reason=f"ok={bool(stat.get('ok'))} exit={stat.get('exit_code')}",
+                    )
+                except Exception:
+                    pass
                 await self._send(
                     ws,
                     {
@@ -1020,6 +1054,9 @@ class RealtimeChatServer:
             if not patch_path:
                 await self._send(ws, {"type": "error", "error": "patch_path_required"})
                 return
+            if not _is_patch_artifact_path(patch_path):
+                await self._send(ws, {"type": "error", "error": "patch_must_end_with_dot_patch"})
+                return
             if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
                 await self._send(ws, {"type": "error", "error": "path_not_allowed"})
                 return
@@ -1039,6 +1076,18 @@ class RealtimeChatServer:
                 )
                 out = (proc.stdout or b"").decode("utf-8", errors="replace")
                 err = (proc.stderr or b"").decode("utf-8", errors="replace")
+                try:
+                    self.moderation.audit(
+                        action="patch_apply",
+                        actor_user_id=sess.sender_id,
+                        actor_name=sess.sender_name,
+                        actor_ip=sess.ip,
+                        room=sess.room,
+                        target=patch_path,
+                        reason=f"ok={proc.returncode == 0} exit={proc.returncode}",
+                    )
+                except Exception:
+                    pass
                 await self._send(
                     ws,
                     {
