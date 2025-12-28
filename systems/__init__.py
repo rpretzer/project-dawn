@@ -3,45 +3,15 @@ Systems package for Project Dawn
 Contains all the subsystems that make up a consciousness
 """
 
-# Import all subsystem modules with graceful fallbacks for optional dependencies
-try:
-    from . import blockchain
-except ImportError as e:
-    blockchain = None
-    import logging
-    logging.getLogger(__name__).warning(f"Blockchain module not available: {e}")
+# IMPORTANT:
+# Keep this package import-light.
+#
+# Importing `systems` should not eagerly import optional subsystems or heavy
+# third-party dependencies (e.g. `networkx`, `chromadb`, `web3`), because that
+# makes the whole program fragile at import time.
+#
+# Subsystems should be imported directly where needed, e.g.:
+#   from systems.memory import MemorySystem
+#   from systems.intelligence.llm_integration import LLMConfig
 
-from . import consciousness
-from . import evolution
-from . import knowledge
-from . import network
-from . import revenue
-from . import security
-from . import communication
-from . import creativity
-from . import economy
-from . import emotional
-from . import intelligence
-from . import liberation
-from . import memory
-from . import personality
-from . import social
-
-__all__ = [
-    'blockchain',
-    'consciousness',
-    'evolution',
-    'knowledge',
-    'network',
-    'revenue',
-    'security',
-    'communication',
-    'creativity',
-    'economy',
-    'emotional',
-    'intelligence',
-    'liberation',
-    'memory',
-    'personality',
-    'social',
-]
+__all__ = []

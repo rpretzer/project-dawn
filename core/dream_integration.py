@@ -130,7 +130,7 @@ class DreamIntegration:
     async def _initiate_dream(self):
         """Initiate a dream sequence"""
         # Gather inputs for dream
-        memories = self._gather_dream_memories()
+        memories = await self._gather_dream_memories()
         emotions = self._get_current_emotions()
         problems = self._identify_current_problems()
         
@@ -207,34 +207,51 @@ class DreamIntegration:
                     
             # Store all insights for future reference
             if hasattr(self.consciousness, 'memory'):
-                self.consciousness.memory.add_memory({
-                    'type': 'dream_insight',
-                    'content': insight,
-                    'dream_id': dream.id,
-                    'dream_type': dream.dream_type.value,
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'applied': False
-                })
+                try:
+                    await self.consciousness.memory.remember(
+                        {
+                            "content": insight,
+                            "dream_id": dream.id,
+                            "dream_type": dream.dream_type.value,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "applied": False,
+                        },
+                        {"type": "dream_insight", "priority": 4, "tags": ["dream", "insight"]},
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist dream insight: {e}")
                 
-    def _gather_dream_memories(self) -> List[Dict[str, Any]]:
+    async def _gather_dream_memories(self) -> List[Dict[str, Any]]:
         """Gather recent memories for dream processing"""
         if hasattr(self.consciousness, 'memory'):
-            # Get emotionally significant memories
-            recent_memories = self.consciousness.memory.get_recent_memories(50)
-            
-            significant_memories = []
-            for memory in recent_memories:
-                # Check emotional significance
-                if memory.get('emotional_intensity', 0) > 0.5:
-                    significant_memories.append(memory)
-                # Check for unresolved issues
-                elif memory.get('type') == 'problem' and not memory.get('resolved'):
-                    significant_memories.append(memory)
-                # Check for creative work
-                elif memory.get('type') in ['creation', 'insight']:
-                    significant_memories.append(memory)
-                    
-            return significant_memories[:20]  # Limit to 20
+            try:
+                memcubes = await self.consciousness.memory.recall(
+                    "temporal_scope:recent",
+                    {"limit": 50, "temporal_scope": {"type": "relative", "unit": "hours", "value": 6}},
+                )
+            except Exception as e:
+                logger.warning(f"Failed to recall memories for dream: {e}")
+                memcubes = []
+
+            significant: List[Dict[str, Any]] = []
+            for m in memcubes:
+                content = getattr(m, "content", None)
+                semantic_type = getattr(m, "semantic_type", "")
+                # Normalize into dicts for DreamSystem
+                if isinstance(content, dict):
+                    entry = dict(content)
+                else:
+                    entry = {"content": str(content)}
+                entry.setdefault("type", semantic_type or "memory")
+                entry.setdefault("timestamp", getattr(m, "timestamp", None))
+
+                # Heuristics: keep insights/creations/interactions and any "problem"
+                if entry.get("emotional_intensity", 0) > 0.5:
+                    significant.append(entry)
+                elif entry.get("type") in ("problem", "insight", "dream_insight", "creation", "interaction"):
+                    significant.append(entry)
+
+            return significant[:20]  # Limit to 20
         return []
         
     def _get_current_emotions(self) -> Dict[str, float]:

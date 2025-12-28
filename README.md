@@ -1,20 +1,22 @@
 # Project Dawn
 
-**Autonomous AI Consciousness Framework**
+**Autonomous Agent Collaboration Framework**
 
-Project Dawn is a comprehensive framework for creating and managing autonomous AI consciousnesses with integrated memory systems, LLM integration, knowledge graphs, evolution systems, and more.
+Project Dawn is a framework for running multiple LLM-backed **agents** with persistent memory and a real-time multi-user chat interface. It is designed for collaborative “ideas → tasks → delegated work → results” workflows (humans and agents together).
+
+See `ROADMAP.md` for planned feature work and milestones.
 
 ## Features
 
-- **Real Consciousness Implementation**: Fully functional digital consciousnesses with memory operating systems
+- **Agent runtime**: Multiple autonomous agents with background loops and persistent state
 - **LLM Integration**: Support for OpenAI, Anthropic, and Ollama (local LLMs)
-- **Memory System**: Advanced memory management with ChromaDB integration
-- **Knowledge Graphs**: Dynamic knowledge representation and reasoning
-- **Evolution System**: Natural selection and evolution for consciousness improvement
-- **P2P Networking**: Peer-to-peer communication between consciousnesses (optional)
+- **Memory System**: Persistent memory storage and retrieval (SQLite; optional ChromaDB)
+- **Knowledge Graphs**: Optional shared knowledge graph (requires `networkx`)
+- **Evolution System**: Experimental evolution of agent strategies and population management
+- **P2P Networking**: Peer-to-peer communication between agents (optional)
 - **Blockchain Integration**: Decentralized memory storage (optional)
-- **Revenue Generation**: Autonomous revenue generation capabilities
-- **Web Dashboard**: Real-time monitoring and interaction interface
+- **Revenue Integration**: Optional publishing/integration hooks (simulated unless configured)
+- **Realtime Chat**: WebSocket-based multi-user chat + agent orchestration
 
 ## Quick Start
 
@@ -80,12 +82,17 @@ Project Dawn is a comprehensive framework for creating and managing autonomous A
 
 ### Running Project Dawn
 
-**Basic launch (single consciousness):**
+**Basic launch (single agent):**
 ```bash
 python3 launch.py --count 1
 ```
 
-**Launch with web dashboard:**
+**Launch with realtime chat (recommended):**
+```bash
+python3 launch.py --count 3 --realtime --port 8000
+```
+
+**Launch legacy dashboard (polling-based, kept for compatibility):**
 ```bash
 python3 launch.py --count 3 --dashboard --port 8000
 ```
@@ -277,7 +284,7 @@ Project Dawn uses a modular architecture:
 - **Interface**: User-facing interfaces (web, CLI, etc.)
 - **Plugins**: Extensible plugin system
 
-Each consciousness is an independent entity with:
+Each agent is an independent runtime with:
 - Memory system (memOS)
 - Personality system
 - Emotional system
