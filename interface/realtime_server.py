@@ -727,6 +727,53 @@ class RealtimeChatServer:
             await self._move_room(sess, room)
             return
 
+        if msg_type == "create_task":
+            room = _sanitize_room(payload.get("room") or sess.room)
+            target = str(payload.get("target") or "").strip() or "all"
+            prompt = _truncate_message(str(payload.get("prompt") or ""), limit=8000)
+            if not prompt:
+                await self._send(ws, {"type": "error", "error": "prompt_required"})
+                return
+            await self._create_tasks(room, sess, target, prompt)
+            # Nudge clients to refresh tasks.
+            tasks = [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t]
+            await self._broadcast(room, {"type": "tasks", "room": room, "tasks": tasks, "ts": time.time()})
+            return
+
+        if msg_type == "rate_task":
+            task_id = str(payload.get("task_id") or "").strip()
+            if not task_id:
+                await self._send(ws, {"type": "error", "error": "task_id_required"})
+                return
+            try:
+                rating = int(payload.get("rating"))
+            except Exception:
+                await self._send(ws, {"type": "error", "error": "rating_must_be_1_to_5"})
+                return
+            comment = payload.get("comment")
+            if comment is not None:
+                comment = _truncate_message(str(comment), limit=1000)
+            t = self.task_store.get_task(task_id)
+            if not t:
+                await self._send(ws, {"type": "error", "error": "unknown_task"})
+                return
+            if t.room != sess.room and not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "not_in_task_room"})
+                return
+            try:
+                self.task_store.record_rating(
+                    task_id,
+                    rater_id=str(sess.sender_id or f"guest:{sess.sender_name}"),
+                    rating=rating,
+                    comment=comment,
+                )
+            except Exception as e:
+                await self._send(ws, {"type": "error", "error": str(e)})
+                return
+            await self._send(ws, {"type": "rated", "task_id": task_id, "rating": rating, "ts": time.time()})
+            await self._system(t.room, f"Recorded rating for {task_id}: {rating}/5")
+            return
+
         if msg_type == "get_tasks":
             room = _sanitize_room(payload.get("room") or sess.room)
             tasks = [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t]
@@ -1474,6 +1521,8 @@ _INDEX_HTML = r"""<!doctype html>
     .taskItem:hover { color:#0ff; }
     #task-detail { white-space: pre-wrap; word-break: break-word; font-size: 12px; color:#cfc; margin-top:6px; }
     #file-viewer { white-space: pre-wrap; word-break: break-word; font-size: 12px; color:#cfc; margin-top:6px; border:1px dashed #0f0; padding:8px; }
+    textarea { width: 100%; min-height: 90px; padding: 8px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box; }
+    select { width: 100%; padding: 6px; border:1px solid #0f0; background:#000; color:#0f0; }
     a { color:#0ff; }
   </style>
 </head>
@@ -1506,6 +1555,30 @@ _INDEX_HTML = r"""<!doctype html>
         <div><strong>Artifacts</strong></div>
         <div id="artifacts" class="hint">—</div>
         <div id="file-viewer" class="hint"> </div>
+        <div class="sep"></div>
+        <div><strong>New Task</strong></div>
+        <div class="hint">Assign to:</div>
+        <select id="task-target">
+          <option value="all">all</option>
+        </select>
+        <div class="hint" style="margin-top:6px;">Prompt:</div>
+        <textarea id="task-prompt" placeholder="Describe the work you want done…"></textarea>
+        <div style="margin-top:6px; display:flex; gap:8px;">
+          <button id="submit-task" style="padding:6px 8px;">submit</button>
+          <button id="clear-task" style="padding:6px 8px;">clear</button>
+        </div>
+        <div class="sep"></div>
+        <div><strong>Rate Task</strong></div>
+        <div class="hint">Select a task (above) to rate it.</div>
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+          <button class="rate-btn" data-rate="1" style="padding:6px 8px;">1</button>
+          <button class="rate-btn" data-rate="2" style="padding:6px 8px;">2</button>
+          <button class="rate-btn" data-rate="3" style="padding:6px 8px;">3</button>
+          <button class="rate-btn" data-rate="4" style="padding:6px 8px;">4</button>
+          <button class="rate-btn" data-rate="5" style="padding:6px 8px;">5</button>
+        </div>
+        <div class="hint" style="margin-top:6px;">Comment (optional):</div>
+        <input id="rate-comment" placeholder="short feedback…" style="width:100%; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; box-sizing:border-box;" />
         <div class="sep"></div>
         <div><strong>Auth</strong></div>
         <div class="auth">
@@ -1544,6 +1617,11 @@ _INDEX_HTML = r"""<!doctype html>
     const refreshTasksBtn = document.getElementById('refresh-tasks');
     const artifactsEl = document.getElementById('artifacts');
     const fileViewerEl = document.getElementById('file-viewer');
+    const taskTargetEl = document.getElementById('task-target');
+    const taskPromptEl = document.getElementById('task-prompt');
+    const submitTaskBtn = document.getElementById('submit-task');
+    const clearTaskBtn = document.getElementById('clear-task');
+    const rateCommentEl = document.getElementById('rate-comment');
 
     const msgEl = document.getElementById('msg');
     const sendBtn = document.getElementById('send');
@@ -1562,6 +1640,8 @@ _INDEX_HTML = r"""<!doctype html>
     let room = 'lobby';
     let tasksById = new Map();
     let artifacts = [];
+    let selectedTaskId = null;
+    let agents = [];
 
     function fmtTs(ts) {
       try { return new Date(ts * 1000).toLocaleTimeString([], {hour12:false}); } catch { return ''; }
@@ -1595,6 +1675,21 @@ _INDEX_HTML = r"""<!doctype html>
       agentsEl.textContent = lines.length ? lines.join('\\n') : '—';
     }
 
+    function setAgentOptions(agents_) {
+      agents = agents_ || [];
+      taskTargetEl.innerHTML = '';
+      const optAll = document.createElement('option');
+      optAll.value = 'all';
+      optAll.textContent = 'all';
+      taskTargetEl.appendChild(optAll);
+      for (const a of agents) {
+        const opt = document.createElement('option');
+        opt.value = a.id;
+        opt.textContent = `${a.name} (${a.id})`;
+        taskTargetEl.appendChild(opt);
+      }
+    }
+
     function renderTasks() {
       const list = Array.from(tasksById.values())
         .filter(t => t.room === room)
@@ -1610,6 +1705,7 @@ _INDEX_HTML = r"""<!doctype html>
         div.className = 'taskItem';
         div.textContent = `${t.status} ${t.id} (${t.assigned_to}) — ${t.title}`;
         div.onclick = () => {
+          selectedTaskId = t.id;
           taskDetailEl.textContent = 'Loading task…';
           artifacts = [];
           artifactsEl.textContent = '—';
@@ -1715,6 +1811,7 @@ _INDEX_HTML = r"""<!doctype html>
           logEl.innerHTML = '';
           (msg.history || []).forEach(addLine);
           setAgents(msg.agents || []);
+          setAgentOptions(msg.agents || []);
           setPresence(msg.presence || []);
           setTasks(msg.tasks || []);
           artifacts = [];
@@ -1731,7 +1828,7 @@ _INDEX_HTML = r"""<!doctype html>
           return;
         }
         if (msg.type === 'who') { setPresence(msg.presence || []); return; }
-        if (msg.type === 'agents') { setAgents(msg.agents || []); return; }
+        if (msg.type === 'agents') { setAgents(msg.agents || []); setAgentOptions(msg.agents || []); return; }
         if (msg.type === 'tasks') { setTasks(msg.tasks || []); return; }
         if (msg.type === 'task' && msg.task) { upsertTask(msg.task); return; }
         if (msg.type === 'task_detail') {
@@ -1761,6 +1858,12 @@ _INDEX_HTML = r"""<!doctype html>
           fileViewerEl.textContent = header + (msg.content || '');
           return;
         }
+        if (msg.type === 'rated') {
+          if (selectedTaskId) {
+            try { ws?.send(JSON.stringify({type:'get_task', task_id: selectedTaskId})); } catch {}
+          }
+          return;
+        }
       };
 
       ws.onopen = () => { /* noop */ };
@@ -1780,6 +1883,23 @@ _INDEX_HTML = r"""<!doctype html>
     registerBtn.onclick = () => register().catch(e => alert(String(e)));
     logoutBtn.onclick = logout;
     refreshTasksBtn.onclick = () => { try { ws?.send(JSON.stringify({type:'get_tasks', room})); } catch {} };
+    submitTaskBtn.onclick = () => {
+      const prompt = (taskPromptEl.value || '').trim();
+      const target = (taskTargetEl.value || 'all').trim();
+      if (!prompt) return;
+      try { ws?.send(JSON.stringify({type:'create_task', room, target, prompt})); } catch {}
+      taskPromptEl.value = '';
+    };
+    clearTaskBtn.onclick = () => { taskPromptEl.value = ''; };
+    document.querySelectorAll('.rate-btn').forEach(btn => {
+      btn.onclick = () => {
+        if (!selectedTaskId) return;
+        const rating = parseInt(btn.getAttribute('data-rate') || '0', 10);
+        const comment = (rateCommentEl.value || '').trim();
+        try { ws?.send(JSON.stringify({type:'rate_task', task_id: selectedTaskId, rating, comment: comment || undefined})); } catch {}
+        rateCommentEl.value = '';
+      };
+    });
 
     connect();
     refreshMe();
