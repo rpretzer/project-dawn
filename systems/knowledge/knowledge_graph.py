@@ -12,7 +12,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from enum import Enum
-import networkx as nx
+try:
+    import networkx as nx
+    _NETWORKX_AVAILABLE = True
+except ImportError:
+    nx = None
+    _NETWORKX_AVAILABLE = False
 import hashlib
 import math
 
@@ -84,6 +89,8 @@ class KnowledgeGraph:
     """Collective knowledge graph shared by all consciousnesses"""
     
     def __init__(self, db_path: Optional[Path] = None):
+        if not _NETWORKX_AVAILABLE:
+            raise ImportError("KnowledgeGraph requires 'networkx'. Install it or disable knowledge features.")
         self.db_path = db_path or Path("data/knowledge_graph.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -131,6 +138,15 @@ class KnowledgeGraph:
                     PRIMARY KEY (source_id, target_id, edge_type)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS access_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id TEXT NOT NULL,
+                    accessor_id TEXT NOT NULL,
+                    access_type TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             conn.commit()
     
     def _load_graph(self):
@@ -173,6 +189,10 @@ class KnowledgeGraph:
                     strength=edge.strength,
                     data=edge
                 )
+
+    # NOTE: A duplicate `_load_graph` implementation previously existed further
+    # down in this file. That duplication caused confusion and made maintenance
+    # error-prone. The canonical implementation is the one above.
                 
     async def add_knowledge(
         self,
@@ -691,43 +711,4 @@ class KnowledgeGraph:
                 
         return export
             
-    def _load_graph(self):
-        """Load graph from database"""
-        with sqlite3.connect(self.db_path) as conn:
-            # Load nodes
-            cursor = conn.execute("SELECT * FROM knowledge_nodes")
-            for row in cursor:
-                node = KnowledgeNode(
-                    id=row[0],
-                    node_type=NodeType(row[1]),
-                    content=json.loads(row[2]),
-                    creator_id=row[3],
-                    confidence=row[4],
-                    importance=row[5],
-                    access_count=row[6],
-                    created_at=datetime.fromisoformat(row[7]),
-                    last_accessed=datetime.fromisoformat(row[8]),
-                    tags=json.loads(row[9])
-                )
-                self.node_cache[node.id] = node
-                self.graph.add_node(node.id, data=node)
-                
-            # Load edges
-            cursor = conn.execute("SELECT * FROM knowledge_edges")
-            for row in cursor:
-                edge = KnowledgeEdge(
-                    source_id=row[0],
-                    target_id=row[1],
-                    edge_type=EdgeType(row[2]),
-                    strength=row[3],
-                    evidence=json.loads(row[4]),
-                    created_by=row[5],
-                    created_at=datetime.fromisoformat(row[6])
-                )
-                self.graph.add_edge(
-                    edge.source_id,
-                    edge.target_id,
-                    type=edge.edge_type,
-                    strength=edge.strength,
-                    data=edge
-                )
+    # (duplicate _load_graph removed)

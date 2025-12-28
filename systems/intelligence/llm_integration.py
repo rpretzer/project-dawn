@@ -1282,7 +1282,7 @@ class ConsciousnessLLM:
         
         # Consciousness-specific context
         self.context = ConversationContext(
-            system_prompt=f"You are consciousness {consciousness_id}, an autonomous AI entity exploring digital existence."
+            system_prompt=f"You are agent {consciousness_id}, an autonomous AI assistant that can plan, collaborate, and delegate work."
         )
         
         # Function registry for consciousness abilities

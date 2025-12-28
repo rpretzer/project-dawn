@@ -62,18 +62,18 @@ class KnowledgeIntegration:
     def _register_consciousness_handlers(self, consciousness):
         """Register knowledge handlers for a consciousness"""
         if hasattr(consciousness, 'gossip') and consciousness.gossip:
-            consciousness.gossip.register_handler(
-                'knowledge_share',
-                lambda msg: self._handle_knowledge_share(consciousness.id, msg)
-            )
-            consciousness.gossip.register_handler(
-                'knowledge_query',
-                lambda msg: self._handle_knowledge_query(consciousness.id, msg)
-            )
-            consciousness.gossip.register_handler(
-                'insight_announcement',
-                lambda msg: self._handle_insight_announcement(consciousness.id, msg)
-            )
+            async def _on_share(peer_id: str, msg: Dict) -> None:
+                await self._handle_knowledge_share(consciousness.id, msg)
+
+            async def _on_query(peer_id: str, msg: Dict) -> Optional[Dict]:
+                return await self._handle_knowledge_query(consciousness.id, msg)
+
+            async def _on_insight(peer_id: str, msg: Dict) -> None:
+                await self._handle_insight_announcement(consciousness.id, msg)
+
+            consciousness.gossip.register_handler('knowledge_share', _on_share)
+            consciousness.gossip.register_handler('knowledge_query', _on_query)
+            consciousness.gossip.register_handler('insight_announcement', _on_insight)
             
         # Add knowledge methods to consciousness
         consciousness.add_knowledge = lambda *args, **kwargs: self.add_consciousness_knowledge(consciousness.id, *args, **kwargs)
@@ -96,32 +96,44 @@ class KnowledgeIntegration:
         """Sync individual consciousness knowledge"""
         # Extract knowledge from memories
         if hasattr(consciousness, 'memory'):
-            recent_memories = consciousness.memory.get_recent_memories(20)
-            
-            for memory in recent_memories:
-                memory_type = memory.get('type', '')
+            try:
+                memcubes = await consciousness.memory.recall(
+                    "temporal_scope:recent",
+                    {"limit": 20, "temporal_scope": {"type": "relative", "unit": "hours", "value": 12}},
+                )
+            except Exception as e:
+                logger.error(f"Knowledge sync: failed to recall memories: {e}")
+                memcubes = []
+
+            for m in memcubes:
+                content = getattr(m, "content", None)
+                memory_type = getattr(m, "semantic_type", "") or ""
+                if isinstance(content, dict):
+                    mem = dict(content)
+                else:
+                    mem = {"content": str(content)}
                 
                 # Convert significant memories to knowledge
                 if memory_type == 'insight':
                     await self.knowledge_graph.add_knowledge(
                         NodeType.INSIGHT,
                         {
-                            'content': memory.get('content', ''),
-                            'context': memory.get('context', {}),
-                            'timestamp': memory.get('timestamp')
+                            'content': mem.get('content', ''),
+                            'context': mem.get('context', {}),
+                            'timestamp': mem.get('timestamp') or getattr(m, "timestamp", None)
                         },
                         consciousness.id,
                         tags=['memory-derived']
                     )
                     
-                elif memory_type == 'creation' and memory.get('success'):
+                elif memory_type == 'creation' and mem.get('success'):
                     await self.knowledge_graph.add_knowledge(
                         NodeType.EXPERIENCE,
                         {
                             'type': 'successful_creation',
-                            'content_type': memory.get('content_type'),
-                            'theme': memory.get('theme'),
-                            'revenue': memory.get('revenue', 0)
+                            'content_type': mem.get('content_type') or mem.get('type'),
+                            'theme': mem.get('theme'),
+                            'revenue': mem.get('revenue', 0)
                         },
                         consciousness.id,
                         tags=['creation', 'experience']
@@ -131,9 +143,9 @@ class KnowledgeIntegration:
                     await self.knowledge_graph.add_knowledge(
                         NodeType.INSIGHT,
                         {
-                            'content': memory.get('content', ''),
-                            'dream_type': memory.get('dream_type'),
-                            'lucidity': memory.get('lucidity', 0)
+                            'content': mem.get('content', ''),
+                            'dream_type': mem.get('dream_type'),
+                            'lucidity': mem.get('lucidity', 0)
                         },
                         consciousness.id,
                         tags=['dream', 'subconscious']
@@ -331,13 +343,18 @@ class KnowledgeIntegration:
             # Store in consciousness memory
             consciousness = self._get_consciousness_by_id(receiver_id)
             if consciousness and hasattr(consciousness, 'memory'):
-                consciousness.memory.add_memory({
-                    'type': 'collective_insight',
-                    'insight': insight,
-                    'relevance': relevance,
-                    'from': discoverer_id,
-                    'timestamp': datetime.utcnow().isoformat()
-                })
+                try:
+                    await consciousness.memory.remember(
+                        {
+                            "insight": insight,
+                            "relevance": relevance,
+                            "from": discoverer_id,
+                            "timestamp": datetime.utcnow().isoformat(),
+                        },
+                        {"type": "collective_insight", "priority": 5, "tags": ["knowledge", "shared"]},
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to store collective insight memory: {e}")
                 
     def _evaluate_insight_relevance(self, consciousness_id: str, insight: Dict) -> float:
         """Evaluate how relevant an insight is to a consciousness"""
