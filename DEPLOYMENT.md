@@ -69,4 +69,6 @@ docker compose up --build
   - `CHAT_ADMIN_REQUIRE_MTLS=true` (expects proxy-provided verification header; see `CHAT_MTLS_VERIFY_HEADER` / `CHAT_MTLS_VERIFY_VALUE`)
 - For risky admin actions (patch apply, moderation commands, admin user changes), enable:
   - `CHAT_REQUIRE_ADMIN_ACTION_TOKEN=true` and set `CHAT_ADMIN_ACTION_TOKEN`
+- If you are behind a reverse proxy and want correct client IPs for bans/admin allowlists, enable:
+  - `CHAT_TRUST_PROXY_HEADERS=true` and set `CHAT_TRUSTED_PROXY_IPS` to your proxy CIDR(s).
 

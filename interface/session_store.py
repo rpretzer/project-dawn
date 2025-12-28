@@ -58,6 +58,7 @@ class SessionStore:
         if not self.token_secret:
             raise ValueError("token_secret_required")
         self._init_db()
+        self.max_sessions_per_user = 20
 
     def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
@@ -123,6 +124,12 @@ class SessionStore:
                     user_agent,
                 ),
             )
+            # Best-effort hygiene: cap sessions per user and prune expired.
+            try:
+                self._prune(conn)
+                self._cap_sessions(conn, user_id=int(user_id), max_sessions=int(self.max_sessions_per_user))
+            except Exception:
+                pass
             conn.commit()
         return sess_id, refresh_token
 
@@ -229,8 +236,39 @@ class SessionStore:
                 """,
                 (float(now), float(now), new_id, old_id),
             )
+            # Best-effort hygiene
+            try:
+                self._prune(conn)
+                self._cap_sessions(conn, user_id=int(user_id), max_sessions=int(self.max_sessions_per_user))
+            except Exception:
+                pass
             conn.commit()
         return user_id, new_id, new_token
+
+    def _prune(self, conn: sqlite3.Connection) -> None:
+        now = _now()
+        # Delete expired records (revoked or not) and long-revoked ones
+        conn.execute("DELETE FROM refresh_sessions WHERE expires_at_ts <= ?", (float(now),))
+
+    def _cap_sessions(self, conn: sqlite3.Connection, *, user_id: int, max_sessions: int) -> None:
+        max_sessions = int(max_sessions)
+        if max_sessions <= 0:
+            return
+        # Keep newest sessions by created_at_ts. Remove older ones beyond cap.
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM refresh_sessions
+            WHERE user_id = ?
+            ORDER BY created_at_ts DESC
+            LIMIT -1 OFFSET ?
+            """,
+            (int(user_id), int(max_sessions)),
+        ).fetchall()
+        ids = [r[0] for r in rows] if rows else []
+        if not ids:
+            return
+        conn.executemany("DELETE FROM refresh_sessions WHERE id = ?", [(str(i),) for i in ids])
 
 
 class PasswordResetStore:
@@ -284,6 +322,10 @@ class PasswordResetStore:
                 """,
                 (tok_id, int(user_id), token_hash, float(now), float(expires_at), requested_ip),
             )
+            try:
+                self._prune(conn)
+            except Exception:
+                pass
             conn.commit()
         return tok_id, token
 
@@ -319,6 +361,16 @@ class PasswordResetStore:
                 "UPDATE password_reset_tokens SET used_at_ts = ? WHERE id = ? AND used_at_ts IS NULL",
                 (float(now), tok_id),
             )
+            try:
+                self._prune(conn)
+            except Exception:
+                pass
             conn.commit()
         return user_id
+
+    def _prune(self, conn: sqlite3.Connection) -> None:
+        now = _now()
+        # Remove expired or used tokens
+        conn.execute("DELETE FROM password_reset_tokens WHERE expires_at_ts <= ?", (float(now),))
+        conn.execute("DELETE FROM password_reset_tokens WHERE used_at_ts IS NOT NULL AND used_at_ts <= ?", (float(now - 3600.0),))
 
