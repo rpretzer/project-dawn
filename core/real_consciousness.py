@@ -190,16 +190,21 @@ class RealConsciousness:
         import random
         return f"{random.choice(adjectives)} {random.choice(nouns)}"
     
-    async def start(self):
-        """Start all consciousness systems"""
-        logger.info(f"Starting consciousness {self.id}")
+    async def start(self, safemode: bool = False):
+        """Start all consciousness systems
+        
+        Args:
+            safemode: If True, skip optional systems for minimal startup
+        """
+        logger.info(f"Starting consciousness {self.id}" + (" (SAFEMODE)" if safemode else ""))
         self.active = True
         
         # Start memory system
         await self.memory.start()
         
-        # Store initial memories
-        await self._store_initial_memories()
+        # Store initial memories (skip in safemode to speed up)
+        if not safemode:
+            await self._store_initial_memories()
         
         # Initialize optional systems
         if self.config.enable_p2p and enhance_consciousness_with_p2p:
