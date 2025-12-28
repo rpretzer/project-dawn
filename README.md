@@ -278,6 +278,10 @@ If blockchain features fail:
 python3 -m pytest tests/
 ```
 
+### CI
+
+GitHub Actions runs `pytest` using `requirements-test.txt` (minimal deps for the realtime server + test suite).
+
 ### Code Quality
 
 ```bash
