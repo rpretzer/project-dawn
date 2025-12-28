@@ -94,16 +94,31 @@ class MemorySystem:
     async def recall(self, query: str, context: Optional[Dict] = None) -> List[MemCube]:
         """Retrieve memories using natural language or structured query"""
         context = context or {}
+        if not isinstance(context, dict):
+            context = {}
         
-        # Parse natural language query
-        parsed_query = self.reader.parse_memory_query(query)
-        parsed_query.update(context)
-        
-        # Schedule and execute
-        return await self.scheduler.schedule_memory_operation(
-            parsed_query,
-            {"consciousness_id": self.consciousness_id, **context}
-        )
+        try:
+            # Parse natural language query
+            parsed_query = self.reader.parse_memory_query(query)
+            if not isinstance(parsed_query, dict):
+                parsed_query = {}
+            
+            # Safely merge context into parsed_query
+            if isinstance(parsed_query, dict) and isinstance(context, dict):
+                parsed_query.update(context)
+            else:
+                parsed_query = context.copy() if isinstance(context, dict) else {}
+            
+            # Schedule and execute
+            return await self.scheduler.schedule_memory_operation(
+                parsed_query,
+                {"consciousness_id": self.consciousness_id, **context}
+            )
+        except Exception as e:
+            logger.error(f"Error in recall: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return []  # Return empty list on error
     
     async def update(self, memory_id: str, updates: Dict[str, Any]) -> bool:
         """Update an existing memory"""
