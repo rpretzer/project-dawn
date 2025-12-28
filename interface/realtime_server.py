@@ -46,20 +46,34 @@ TOKEN_COOKIE_NAME = os.getenv("CHAT_TOKEN_COOKIE", "dawn_token")
 CSRF_COOKIE_NAME = os.getenv("CHAT_CSRF_COOKIE", "dawn_csrf")
 ENV = (os.getenv("DAWN_ENV") or os.getenv("APP_ENV") or "dev").strip().lower()
 
-
-def _jwt_secret() -> str:
-    secret = os.getenv("JWT_SECRET")
-    if secret:
-        return secret
-    if ENV == "prod":
-        raise RuntimeError("JWT_SECRET must be set in production mode (DAWN_ENV=prod).")
-    # Dev fallback. For public deployments, JWT_SECRET should be set.
-    logger.warning("JWT_SECRET not set; using ephemeral secret (sessions will not survive restart).")
-    return secrets.token_urlsafe(48)
-
-
-JWT_SECRET = _jwt_secret()
 JWT_ALG = "HS256"
+
+
+def _jwt_secrets() -> List[str]:
+    """
+    Support safe JWT secret rotation.
+
+    - JWT_SECRET: current signing secret (required in prod)
+    - JWT_OLD_SECRETS: optional comma-separated list of previous secrets accepted for verification
+    """
+    current = (os.getenv("JWT_SECRET") or "").strip()
+    if not current:
+        if ENV == "prod":
+            raise RuntimeError("JWT_SECRET must be set in production mode (DAWN_ENV=prod).")
+        logger.warning("JWT_SECRET not set; using ephemeral secret (sessions will not survive restart).")
+        current = secrets.token_urlsafe(48)
+        return [current]
+    olds_raw = (os.getenv("JWT_OLD_SECRETS") or "").strip()
+    olds = [s.strip() for s in olds_raw.split(",") if s.strip()] if olds_raw else []
+    out: List[str] = []
+    for s in [current, *olds]:
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+JWT_SECRETS = _jwt_secrets()
+JWT_SECRET_CURRENT = JWT_SECRETS[0]
 
 
 def _prom_escape_label_value(v: str) -> str:
@@ -106,16 +120,18 @@ def _issue_token(*, user_id: int, username: str, nickname: str) -> str:
     exp = now + int(os.getenv("JWT_TTL_SECONDS", "86400"))  # 24h default
     return jwt.encode(
         {"sub": str(user_id), "username": username, "nickname": nickname, "iat": now, "exp": exp},
-        JWT_SECRET,
+        JWT_SECRET_CURRENT,
         algorithm=JWT_ALG,
     )
 
 
 def _decode_token(token: str) -> Optional[Dict[str, Any]]:
-    try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-    except Exception:
-        return None
+    for secret in JWT_SECRETS:
+        try:
+            return jwt.decode(token, secret, algorithms=[JWT_ALG])
+        except Exception:
+            continue
+    return None
 
 
 def _allowed_origins() -> Optional[Set[str]]:

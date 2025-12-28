@@ -57,4 +57,8 @@ docker compose up --build
 - Cookie behavior is controlled via `CHAT_COOKIE_SAMESITE` (defaults to `Strict` in prod).
 - For browser clients in production, the server requires a **double-submit CSRF token** on auth-related POSTs (`/api/login`, `/api/register`, `/api/logout`) when `CHAT_REQUIRE_CSRF=true` (default in prod).
   - Fetch a token from `GET /api/csrf` and include it as `X-CSRF-Token` on those POST requests.
+- To rotate JWT secrets without immediately invalidating all sessions:
+  - Set `JWT_SECRET` to the new secret.
+  - Put the old secret(s) into `JWT_OLD_SECRETS` for a temporary overlap window.
+  - After TTL expiry (see `JWT_TTL_SECONDS`), remove old secrets from `JWT_OLD_SECRETS`.
 
