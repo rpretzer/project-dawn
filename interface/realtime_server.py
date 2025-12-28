@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 from collections import deque, defaultdict
+from pathlib import Path
 
 import jwt
 from aiohttp import web, WSMsgType
@@ -29,7 +30,7 @@ from .user_database import UserDatabase
 from .chat_store import ChatStore
 from .moderation_store import ModerationStore
 from core.orchestrator import AgentOrchestrator
-from core.task_manager import TaskStore
+from core.task_manager import TaskStore, Task
 from core.agent_policy import AgentPolicy
 from core.evolution_engine import EvolutionEngine
 from core.evolution_manager import EvolutionManager
@@ -112,6 +113,26 @@ def _truncate_message(text: str, limit: int = 4000) -> str:
     return text
 
 
+def _task_public(t: Task) -> Dict[str, Any]:
+    """
+    Public-safe task shape for the web UI.
+    Avoids leaking full prompts by default.
+    """
+    return {
+        "id": t.id,
+        "room": t.room,
+        "created_by": t.created_by,
+        "requested_by_name": t.requested_by_name,
+        "assigned_to": t.assigned_to,
+        "title": t.title,
+        "status": t.status,
+        "result": (t.result[:3000] if t.result else None),
+        "error": (t.error[:1000] if t.error else None),
+        "created_at_ts": t.created_at_ts,
+        "updated_at_ts": t.updated_at_ts,
+    }
+
+
 def _is_command(text: str) -> bool:
     return text.strip().startswith("/")
 
@@ -124,7 +145,12 @@ class RealtimeChatServer:
         self.user_db = UserDatabase()
         self.chat_store = ChatStore()
         self.task_store = TaskStore()
-        self.orchestrator = AgentOrchestrator(agents=self.consciousnesses, swarm=self.swarm, task_store=self.task_store)
+        self.orchestrator = AgentOrchestrator(
+            agents=self.consciousnesses,
+            swarm=self.swarm,
+            task_store=self.task_store,
+            workspace_root=Path(os.getenv("DAWN_WORKSPACE_ROOT", "/workspace")),
+        )
         self.moderation = ModerationStore()
         self.evolution = EvolutionEngine(task_store=self.task_store, policy_store=self.orchestrator.policy_store)
         self.evolution_manager = EvolutionManager(
@@ -209,6 +235,9 @@ class RealtimeChatServer:
                 task = event.get("task") or {}
                 room = str(task.get("room") or DEFAULT_ROOM)
                 task_id = str(task.get("id") or "")
+                t = self.task_store.get_task(task_id) if task_id else None
+                if t:
+                    await self._broadcast(room, {"type": "task", "event": "started", "task": _task_public(t), "ts": time.time()})
                 status = str(task.get("status") or ev)
                 assigned_to = str(task.get("assigned_to") or "")
                 title = str(task.get("title") or "")
@@ -218,6 +247,9 @@ class RealtimeChatServer:
                 task = event.get("task") or {}
                 room = str(task.get("room") or DEFAULT_ROOM)
                 task_id = str(task.get("id") or "")
+                t = self.task_store.get_task(task_id) if task_id else None
+                if t:
+                    await self._broadcast(room, {"type": "task", "event": "completed", "task": _task_public(t), "ts": time.time()})
                 assigned_to = str(task.get("assigned_to") or "")
                 title = str(task.get("title") or "")
                 result = str(task.get("result") or "").strip()
@@ -239,6 +271,9 @@ class RealtimeChatServer:
                 task = event.get("task") or {}
                 room = str(task.get("room") or DEFAULT_ROOM)
                 task_id = str(task.get("id") or "")
+                t = self.task_store.get_task(task_id) if task_id else None
+                if t:
+                    await self._broadcast(room, {"type": "task", "event": "failed", "task": _task_public(t), "ts": time.time()})
                 assigned_to = str(task.get("assigned_to") or "")
                 title = str(task.get("title") or "")
                 err = str(task.get("error") or "failed")
@@ -250,6 +285,7 @@ class RealtimeChatServer:
                 do = str(event.get("do") or "")
                 task = self.task_store.get_task(task_id) if task_id else None
                 room = task.room if task else DEFAULT_ROOM
+                await self._broadcast(room, {"type": "task", "event": "progress", "task_id": task_id, "step": step, "do": do, "ts": time.time()})
                 await self._system(room, f"[task {task_id}] step {step}: {do}")
                 return
             if ev == "tool":
@@ -257,6 +293,7 @@ class RealtimeChatServer:
                 name = str(event.get("name") or "")
                 task = self.task_store.get_task(task_id) if task_id else None
                 room = task.room if task else DEFAULT_ROOM
+                await self._broadcast(room, {"type": "task", "event": "tool", "task_id": task_id, "name": name, "ts": time.time()})
                 await self._system(room, f"[task {task_id}] tool: {name}")
                 return
         except Exception:
@@ -552,6 +589,7 @@ class RealtimeChatServer:
                 ],
                 "presence": self._current_presence(room),
                 "history": [m.to_dict() for m in self.chat_store.get_recent(room=room, limit=200)],
+                "tasks": [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t],
                 "ts": time.time(),
             },
         )
@@ -600,6 +638,33 @@ class RealtimeChatServer:
         if msg_type == "set_room":
             room = _sanitize_room(payload.get("room"))
             await self._move_room(sess, room)
+            return
+
+        if msg_type == "get_tasks":
+            room = _sanitize_room(payload.get("room") or sess.room)
+            tasks = [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t]
+            await self._send(ws, {"type": "tasks", "room": room, "tasks": tasks, "ts": time.time()})
+            return
+
+        if msg_type == "get_task":
+            task_id = str(payload.get("task_id") or "").strip()
+            if not task_id:
+                await self._send(ws, {"type": "error", "error": "task_id_required"})
+                return
+            t = self.task_store.get_task(task_id)
+            if not t:
+                await self._send(ws, {"type": "error", "error": "unknown_task"})
+                return
+            evs = self.task_store.get_events(task_id, after_id=0, limit=200)
+            await self._send(
+                ws,
+                {
+                    "type": "task_detail",
+                    "task": _task_public(t),
+                    "events": [e.to_dict() for e in evs],
+                    "ts": time.time(),
+                },
+            )
             return
 
         await self._send(ws, {"type": "error", "error": "unknown_message_type"})
@@ -1289,6 +1354,9 @@ _INDEX_HTML = r"""<!doctype html>
     .auth input { width: 140px; padding:6px; border:1px solid #0f0; background:#000; color:#0f0; }
     .hint { color:#6f6; font-size: 12px; margin-top: 6px; }
     .sep { border-top:1px solid #0f0; margin: 10px 0; }
+    .taskItem { cursor:pointer; color:#9f9; font-size: 12px; margin: 6px 0; }
+    .taskItem:hover { color:#0ff; }
+    #task-detail { white-space: pre-wrap; word-break: break-word; font-size: 12px; color:#cfc; margin-top:6px; }
     a { color:#0ff; }
   </style>
 </head>
@@ -1310,6 +1378,13 @@ _INDEX_HTML = r"""<!doctype html>
         <div class="sep"></div>
         <div><strong>Agents</strong></div>
         <div id="agents" class="hint">—</div>
+        <div class="sep"></div>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+          <div><strong>Tasks</strong></div>
+          <button id="refresh-tasks" style="padding:6px 8px;">refresh</button>
+        </div>
+        <div id="tasks" class="hint">—</div>
+        <div id="task-detail" class="hint"> </div>
         <div class="sep"></div>
         <div><strong>Auth</strong></div>
         <div class="auth">
@@ -1343,6 +1418,9 @@ _INDEX_HTML = r"""<!doctype html>
     const logEl = document.getElementById('log');
     const presenceEl = document.getElementById('presence');
     const agentsEl = document.getElementById('agents');
+    const tasksEl = document.getElementById('tasks');
+    const taskDetailEl = document.getElementById('task-detail');
+    const refreshTasksBtn = document.getElementById('refresh-tasks');
 
     const msgEl = document.getElementById('msg');
     const sendBtn = document.getElementById('send');
@@ -1359,6 +1437,7 @@ _INDEX_HTML = r"""<!doctype html>
     // We intentionally do NOT store tokens in localStorage or put them in URLs.
     let ws = null;
     let room = 'lobby';
+    let tasksById = new Map();
 
     function fmtTs(ts) {
       try { return new Date(ts * 1000).toLocaleTimeString([], {hour12:false}); } catch { return ''; }
@@ -1390,6 +1469,42 @@ _INDEX_HTML = r"""<!doctype html>
     function setAgents(agents) {
       const lines = (agents || []).map(a => `${a.name} (${a.id})`).sort();
       agentsEl.textContent = lines.length ? lines.join('\\n') : '—';
+    }
+
+    function renderTasks() {
+      const list = Array.from(tasksById.values())
+        .filter(t => t.room === room)
+        .sort((a,b) => (b.created_at_ts||0) - (a.created_at_ts||0))
+        .slice(0, 25);
+      tasksEl.innerHTML = '';
+      if (!list.length) {
+        tasksEl.textContent = '—';
+        return;
+      }
+      for (const t of list) {
+        const div = document.createElement('div');
+        div.className = 'taskItem';
+        div.textContent = `${t.status} ${t.id} (${t.assigned_to}) — ${t.title}`;
+        div.onclick = () => {
+          taskDetailEl.textContent = 'Loading task…';
+          try { ws?.send(JSON.stringify({type:'get_task', task_id: t.id})); } catch {}
+        };
+        tasksEl.appendChild(div);
+      }
+    }
+
+    function setTasks(tasks) {
+      tasksById = new Map();
+      for (const t of (tasks || [])) {
+        if (t && t.id) tasksById.set(t.id, t);
+      }
+      renderTasks();
+    }
+
+    function upsertTask(t) {
+      if (!t || !t.id) return;
+      tasksById.set(t.id, t);
+      renderTasks();
     }
 
     async function auth(path, payload) {
@@ -1440,6 +1555,8 @@ _INDEX_HTML = r"""<!doctype html>
 
       presenceEl.textContent = 'Connecting…';
       agentsEl.textContent = '—';
+      tasksEl.textContent = '—';
+      taskDetailEl.textContent = ' ';
 
       ws.onmessage = (evt) => {
         let msg;
@@ -1452,6 +1569,7 @@ _INDEX_HTML = r"""<!doctype html>
           (msg.history || []).forEach(addLine);
           setAgents(msg.agents || []);
           setPresence(msg.presence || []);
+          setTasks(msg.tasks || []);
           return;
         }
         if (msg.type === 'message') {
@@ -1464,6 +1582,28 @@ _INDEX_HTML = r"""<!doctype html>
         }
         if (msg.type === 'who') { setPresence(msg.presence || []); return; }
         if (msg.type === 'agents') { setAgents(msg.agents || []); return; }
+        if (msg.type === 'tasks') { setTasks(msg.tasks || []); return; }
+        if (msg.type === 'task' && msg.task) { upsertTask(msg.task); return; }
+        if (msg.type === 'task_detail') {
+          const t = msg.task;
+          if (t) upsertTask(t);
+          const evs = msg.events || [];
+          const lines = [];
+          if (t) {
+            lines.push(`id=${t.id} status=${t.status} agent=${t.assigned_to}`);
+            lines.push(`title: ${t.title}`);
+            if (t.error) lines.push(`error: ${t.error}`);
+            if (t.result) { lines.push('result:'); lines.push(String(t.result)); }
+          }
+          if (evs.length) {
+            lines.push('events:');
+            for (const e of evs.slice(-50)) {
+              lines.push(`- ${e.id} ${e.event_type} ${JSON.stringify(e.payload)}`);
+            }
+          }
+          taskDetailEl.textContent = lines.join('\\n');
+          return;
+        }
       };
 
       ws.onopen = () => { /* noop */ };
@@ -1482,11 +1622,14 @@ _INDEX_HTML = r"""<!doctype html>
     loginBtn.onclick = () => login().catch(e => alert(String(e)));
     registerBtn.onclick = () => register().catch(e => alert(String(e)));
     logoutBtn.onclick = logout;
+    refreshTasksBtn.onclick = () => { try { ws?.send(JSON.stringify({type:'get_tasks', room})); } catch {} };
 
     connect();
     refreshMe();
     // Refresh presence periodically via /who (cheap and robust).
     setInterval(() => { try { ws?.send(JSON.stringify({ type:'chat', room, content: '/who' })); } catch {} }, 8000);
+    // Refresh tasks periodically as well (cheap).
+    setInterval(() => { try { ws?.send(JSON.stringify({ type:'get_tasks', room })); } catch {} }, 12000);
   </script>
 </body>
 </html>

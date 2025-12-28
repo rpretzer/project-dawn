@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from core.task_manager import Task, TaskStore
@@ -61,10 +63,18 @@ class AgentOrchestrator:
     Maintains task queues per agent and executes tasks in background.
     """
 
-    def __init__(self, *, agents: List[Any], swarm: Any = None, task_store: Optional[TaskStore] = None):
+    def __init__(
+        self,
+        *,
+        agents: List[Any],
+        swarm: Any = None,
+        task_store: Optional[TaskStore] = None,
+        workspace_root: Optional[Path] = None,
+    ):
         self.agents = agents
         self.swarm = swarm
         self.task_store = task_store or TaskStore()
+        self.workspace_root = (workspace_root or Path(os.getenv("DAWN_WORKSPACE_ROOT", "/workspace"))).resolve()
 
         self._queues: Dict[str, asyncio.Queue[str]] = {}
         self._workers: Dict[str, asyncio.Task[None]] = {}
@@ -80,6 +90,19 @@ class AgentOrchestrator:
         self._sink = sink
 
     def _register_default_tools(self) -> None:
+        def _resolve_safe(rel_path: str) -> Path:
+            p = str(rel_path or "").strip()
+            if not p:
+                raise ValueError("path_required")
+            # Treat absolute paths as relative to workspace (avoid escaping).
+            if p.startswith("/"):
+                p = p.lstrip("/")
+            cand = (self.workspace_root / p).resolve()
+            # Ensure it's within the workspace root.
+            if self.workspace_root not in cand.parents and cand != self.workspace_root:
+                raise ValueError("path_outside_workspace")
+            return cand
+
         async def tool_spawn_agent(args: Dict[str, Any]) -> Dict[str, Any]:
             if not self.swarm:
                 return {"ok": False, "error": "swarm_unavailable"}
@@ -132,6 +155,69 @@ class AgentOrchestrator:
             await self.enqueue(t.id)
             return {"ok": True, "task_id": t.id}
 
+        async def tool_fs_list(args: Dict[str, Any]) -> Dict[str, Any]:
+            pattern = str(args.get("glob") or "**/*").strip()
+            limit = int(args.get("limit", 200))
+            limit = max(1, min(limit, 500))
+            try:
+                # Only allow relative globs.
+                if pattern.startswith("/"):
+                    pattern = pattern.lstrip("/")
+                paths: List[str] = []
+                for p in self.workspace_root.glob(pattern):
+                    try:
+                        rp = p.resolve()
+                        if self.workspace_root not in rp.parents and rp != self.workspace_root:
+                            continue
+                        if rp.is_dir():
+                            continue
+                        paths.append(str(rp.relative_to(self.workspace_root)))
+                    except Exception:
+                        continue
+                    if len(paths) >= limit:
+                        break
+                return {"ok": True, "paths": sorted(paths)[:limit]}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        async def tool_fs_read(args: Dict[str, Any]) -> Dict[str, Any]:
+            path = str(args.get("path") or "")
+            max_bytes = int(args.get("max_bytes", 50_000))
+            max_bytes = max(1_000, min(max_bytes, 500_000))
+            try:
+                p = _resolve_safe(path)
+                if not p.exists() or not p.is_file():
+                    return {"ok": False, "error": "not_found"}
+                data = p.read_bytes()
+                if len(data) > max_bytes:
+                    data = data[:max_bytes]
+                    truncated = True
+                else:
+                    truncated = False
+                # Best-effort decode.
+                text = data.decode("utf-8", errors="replace")
+                return {"ok": True, "path": str(p.relative_to(self.workspace_root)), "content": text, "truncated": truncated}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        async def tool_fs_write(args: Dict[str, Any]) -> Dict[str, Any]:
+            path = str(args.get("path") or "")
+            content = args.get("content")
+            overwrite = bool(args.get("overwrite", True))
+            if not isinstance(content, str):
+                return {"ok": False, "error": "content_must_be_string"}
+            if len(content) > 200_000:
+                return {"ok": False, "error": "content_too_large"}
+            try:
+                p = _resolve_safe(path)
+                if p.exists() and not overwrite:
+                    return {"ok": False, "error": "exists"}
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(content, encoding="utf-8")
+                return {"ok": True, "path": str(p.relative_to(self.workspace_root)), "bytes": len(content.encode("utf-8"))}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
         self.tools.register(
             ToolSpec(
                 name="spawn_agent",
@@ -162,6 +248,51 @@ class AgentOrchestrator:
                 },
             ),
             tool_delegate_task,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="fs_list",
+                description="List files in the workspace by glob pattern.",
+                json_schema={
+                    "type": "object",
+                    "properties": {
+                        "glob": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+                    },
+                },
+            ),
+            tool_fs_list,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="fs_read",
+                description="Read a UTF-8 text file from the workspace.",
+                json_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "max_bytes": {"type": "integer", "minimum": 1000, "maximum": 500000},
+                    },
+                    "required": ["path"],
+                },
+            ),
+            tool_fs_read,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="fs_write",
+                description="Write a UTF-8 text file into the workspace.",
+                json_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "overwrite": {"type": "boolean"},
+                    },
+                    "required": ["path", "content"],
+                },
+            ),
+            tool_fs_write,
         )
 
     def _ensure_worker_for_agent(self, agent: Any) -> None:
