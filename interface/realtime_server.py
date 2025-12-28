@@ -34,12 +34,16 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_ROOM = "lobby"
+TOKEN_COOKIE_NAME = os.getenv("CHAT_TOKEN_COOKIE", "dawn_token")
+ENV = (os.getenv("DAWN_ENV") or os.getenv("APP_ENV") or "dev").strip().lower()
 
 
 def _jwt_secret() -> str:
     secret = os.getenv("JWT_SECRET")
     if secret:
         return secret
+    if ENV == "prod":
+        raise RuntimeError("JWT_SECRET must be set in production mode (DAWN_ENV=prod).")
     # Dev fallback. For public deployments, JWT_SECRET should be set.
     logger.warning("JWT_SECRET not set; using ephemeral secret (sessions will not survive restart).")
     return secrets.token_urlsafe(48)
@@ -77,6 +81,13 @@ def _decode_token(token: str) -> Optional[Dict[str, Any]]:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
     except Exception:
         return None
+
+
+def _allowed_origins() -> Optional[Set[str]]:
+    raw = (os.getenv("CHAT_ALLOWED_ORIGINS") or "").strip()
+    if not raw:
+        return None
+    return {o.strip() for o in raw.split(",") if o.strip()}
 
 
 def _sanitize_room(room: Optional[str]) -> str:
@@ -129,6 +140,32 @@ class RealtimeChatServer:
         # Start orchestrator workers and wire event sink to broadcast to rooms
         asyncio.create_task(self.orchestrator.start())
         self.orchestrator.set_event_sink(self._orchestrator_event_sink)
+        self._origins = _allowed_origins()
+
+    def _check_origin(self, request: web.Request) -> bool:
+        # In dev, allow everything.
+        if ENV != "prod":
+            return True
+        origin = request.headers.get("Origin")
+        if not origin:
+            return True  # non-browser clients
+        if not self._origins:
+            return True  # no allowlist configured
+        return origin in self._origins
+
+    def _set_auth_cookie(self, resp: web.Response, token: str, request: web.Request) -> None:
+        ttl = int(os.getenv("JWT_TTL_SECONDS", "86400"))
+        secure = (ENV == "prod") or (request.scheme == "https")
+        # HttpOnly cookie so it is not accessible to JS; websocket can still send it.
+        resp.set_cookie(
+            TOKEN_COOKIE_NAME,
+            token,
+            max_age=ttl,
+            httponly=True,
+            secure=secure,
+            samesite="Lax",
+            path="/",
+        )
 
     async def _orchestrator_event_sink(self, event: Dict[str, Any]) -> None:
         """
@@ -248,6 +285,8 @@ class RealtimeChatServer:
         return True
 
     async def http_register(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
         ip = request.remote or "unknown"
         if not self._check_auth_rate_limit(ip):
             return _json_response({"success": False, "error": "rate_limited"}, status=429)
@@ -280,9 +319,13 @@ class RealtimeChatServer:
             return _json_response({"success": False, "error": err or "registration_failed"}, status=400)
 
         token = _issue_token(user_id=user_id, username=username.strip().lower(), nickname=nickname)
-        return _json_response({"success": True, "token": token, "user": {"id": user_id, "username": username, "nickname": nickname}})
+        resp = _json_response({"success": True, "token": token, "user": {"id": user_id, "username": username, "nickname": nickname}})
+        self._set_auth_cookie(resp, token, request)
+        return resp
 
     async def http_login(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
         ip = request.remote or "unknown"
         if not self._check_auth_rate_limit(ip):
             return _json_response({"success": False, "error": "rate_limited"}, status=429)
@@ -312,16 +355,31 @@ class RealtimeChatServer:
         self.user_db.update_last_login(int(user["id"]))
         nickname = user.get("nickname") or user["username"]
         token = _issue_token(user_id=int(user["id"]), username=user["username"], nickname=nickname)
-        return _json_response({"success": True, "token": token, "user": {"id": user["id"], "username": user["username"], "nickname": nickname}})
+        resp = _json_response({"success": True, "token": token, "user": {"id": user["id"], "username": user["username"], "nickname": nickname}})
+        self._set_auth_cookie(resp, token, request)
+        return resp
+
+    async def http_logout(self, request: web.Request) -> web.Response:
+        if not self._check_origin(request):
+            return _json_response({"success": False, "error": "origin_not_allowed"}, status=403)
+        resp = _json_response({"success": True})
+        resp.del_cookie(TOKEN_COOKIE_NAME, path="/")
+        return resp
 
     async def ws_handler(self, request: web.Request) -> web.StreamResponse:
+        if not self._check_origin(request):
+            raise web.HTTPForbidden(text="origin_not_allowed")
         ws = web.WebSocketResponse(heartbeat=20, receive_timeout=60)
         await ws.prepare(request)
 
         self._clients.add(ws)
 
-        # Identify user (JWT in query ?token=... or first message auth)
-        token = request.query.get("token")
+        # Identify user:
+        # - Prefer HttpOnly cookie (safe for public deployments)
+        # - Accept query param only in non-prod for backward compatibility
+        token = request.cookies.get(TOKEN_COOKIE_NAME)
+        if not token and ENV != "prod":
+            token = request.query.get("token")
         claims = _decode_token(token) if token else None
 
         if claims:
@@ -451,13 +509,22 @@ class RealtimeChatServer:
         if cmd in ("/help", "/?"):
             await self._system(
                 room,
-                "Commands: /help, /who, /agents, /ask <agent|all> <msg>, /spawn [n], /task <agent|all> <work>, /tasks",
+                "Commands: /help, /who, /join <room>, /agents, /ask <agent|all> <msg>, /spawn [n], /task <agent|all> <work>, /tasks",
             )
             return
 
         if cmd == "/who":
             pres = self._current_presence(room)
             await self._send(sess.ws, {"type": "who", "room": room, "presence": pres})
+            return
+
+        if cmd == "/join":
+            if len(parts) < 2:
+                await self._system(room, "Usage: /join <room>")
+                return
+            new_room = _sanitize_room(parts[1])
+            await self._move_room(sess, new_room)
+            await self._system(new_room, f"{sess.sender_name} joined {new_room}")
             return
 
         if cmd == "/agents":
@@ -652,6 +719,7 @@ def create_app(*, consciousnesses: List[Any], swarm: Any = None) -> web.Applicat
 
     app.router.add_post("/api/register", server.http_register)
     app.router.add_post("/api/login", server.http_login)
+    app.router.add_post("/api/logout", server.http_logout)
     app.router.add_get("/ws", server.ws_handler)
 
     async def _on_cleanup(app_: web.Application) -> None:
@@ -775,7 +843,8 @@ _INDEX_HTML = r"""<!doctype html>
     const registerBtn = document.getElementById('register');
     const logoutBtn = document.getElementById('logout');
 
-    let token = localStorage.getItem('jwt') || null;
+    // Auth uses an HttpOnly cookie (set by /api/login or /api/register).
+    // We intentionally do NOT store tokens in localStorage or put them in URLs.
     let ws = null;
     let room = 'lobby';
 
@@ -819,30 +888,25 @@ _INDEX_HTML = r"""<!doctype html>
     }
 
     async function login() {
-      const data = await auth('/api/login', { username: uEl.value.trim(), password: pEl.value });
-      token = data.token;
-      localStorage.setItem('jwt', token);
+      await auth('/api/login', { username: uEl.value.trim(), password: pEl.value });
       connect();
     }
 
     async function register() {
-      const data = await auth('/api/register', { username: uEl.value.trim(), password: pEl.value, nickname: nEl.value.trim() || undefined });
-      token = data.token;
-      localStorage.setItem('jwt', token);
+      await auth('/api/register', { username: uEl.value.trim(), password: pEl.value, nickname: nEl.value.trim() || undefined });
       connect();
     }
 
     function logout() {
-      token = null;
-      localStorage.removeItem('jwt');
-      connect();
+      fetch('/api/logout', { method:'POST' })
+        .then(() => connect())
+        .catch(() => connect());
     }
 
     function connect() {
       if (ws) { try { ws.close(); } catch {} ws = null; }
       const url = new URL((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws');
       url.searchParams.set('room', room);
-      if (token) url.searchParams.set('token', token);
       ws = new WebSocket(url.toString());
 
       presenceEl.textContent = 'Connecting…';
