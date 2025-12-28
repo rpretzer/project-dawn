@@ -735,8 +735,10 @@ class AgentOrchestrator:
             "- If you need to inspect repo state, use fs_list/fs_read.\n"
             "- If you need to reference external docs, use http_get/http_get_json (host allowlist applies).\n"
             "- If you need to summarize changes you made, use git_status and git_diff (read-only).\n"
-            "- If you need to propose code changes spanning multiple hunks/files, prefer fs_apply_patch (unified diff) and run it with check_only=true first.\n"
-            "- IMPORTANT: by default you should NOT apply patches; write the patch to artifacts/<task_id>/change.patch and ask for approval.\n"
+            "- If you need to propose code changes spanning multiple hunks/files, produce a unified diff and:\n"
+            "  - write it to artifacts/<task_id>/change.patch via fs_write\n"
+            "  - validate it with fs_apply_patch(check_only=true)\n"
+            "- IMPORTANT: by default you should NOT apply patches; ask for approval and have an admin apply the .patch artifact in the UI.\n"
         )
         prompt = (
             f"{system}\n"
@@ -768,6 +770,7 @@ class AgentOrchestrator:
             res = tr.get("result") or {}
             if isinstance(res, dict) and res.get("ok") and res.get("path"):
                 written.append(str(res.get("path")))
+        patch_files = [p for p in written if p.endswith(".patch")]
 
         prompt = (
             f"Finalize this task for the requester.\n"
@@ -775,8 +778,11 @@ class AgentOrchestrator:
             f"Task: {task.title}\n"
             f"Prompt: {task.prompt}\n"
             f"Policy: verbosity={policy.verbosity}.\n"
+            f"Artifacts written: {json.dumps(written, ensure_ascii=False)}\n"
+            f"Patch artifacts (review/apply): {json.dumps(patch_files, ensure_ascii=False)}\n"
             f"Tool results (most recent first):\n{json.dumps(list(reversed(tool_results))[:12], ensure_ascii=False)}\n\n"
             f"If you created files, list them explicitly (paths) and describe what they contain.\n"
+            f"If you created a .patch artifact, summarize what it changes and how to validate it (fs_apply_patch check_only already ran or should be run), then instruct an admin to apply it via the UI.\n"
             f"Prefer writing substantial deliverables to artifacts/{task.id}/... and referencing paths.\n"
             f"Return a concise deliverable and next steps.\n"
         )
