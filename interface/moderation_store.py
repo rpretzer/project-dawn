@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from core.db_migrations import ensure_schema
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +56,7 @@ class ModerationStore:
 
     def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
+            ensure_schema(conn, schema_name="moderation_store", target_version=1)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bans (

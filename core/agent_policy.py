@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.db_migrations import ensure_schema
+
 
 @dataclass(frozen=True)
 class AgentPolicy:
@@ -45,6 +47,7 @@ class PolicyStore:
 
     def _init_db(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
+            ensure_schema(conn, schema_name="policy_store", target_version=1)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_policies (

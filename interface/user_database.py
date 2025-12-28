@@ -9,6 +9,8 @@ from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 from datetime import datetime
 
+from core.db_migrations import ensure_schema
+
 logger = logging.getLogger(__name__)
 
 class UserDatabase:
@@ -27,6 +29,7 @@ class UserDatabase:
     def _init_database(self):
         """Initialize database schema"""
         with sqlite3.connect(self.db_path) as conn:
+            ensure_schema(conn, schema_name="user_database", target_version=1)
             # Users table
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
