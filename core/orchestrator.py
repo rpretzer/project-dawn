@@ -20,6 +20,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from core.task_manager import Task, TaskStore
@@ -110,6 +111,72 @@ class AgentOrchestrator:
             if len(data) > max_bytes:
                 raise ValueError("file_too_large")
             return data.decode("utf-8", errors="replace")
+
+        def _patch_prefixes() -> List[str]:
+            """
+            Workspace-relative prefixes allowed for fs_apply_patch.
+            Defaults to code-ish paths but blocks secrets by omission.
+            Override with DAWN_PATCH_PREFIXES="core/,interface/,tests/" etc.
+            """
+            raw = (os.getenv("DAWN_PATCH_PREFIXES") or "").strip()
+            if raw:
+                prefs = [p.strip() for p in raw.split(",") if p.strip()]
+            else:
+                prefs = [
+                    "core/",
+                    "interface/",
+                    "systems/",
+                    "plugins/",
+                    "tests/",
+                    "README.md",
+                    "ROADMAP.md",
+                    "requirements.txt",
+                ]
+            # Normalize (no leading slash).
+            out: List[str] = []
+            for p in prefs:
+                p = p.strip().lstrip("/")
+                if not p:
+                    continue
+                out.append(p)
+            return out
+
+        def _extract_patch_paths(unified_diff: str) -> List[str]:
+            """
+            Extract b/<path> from `diff --git a/... b/...` headers.
+            This is used only for allowlist enforcement.
+            """
+            paths: List[str] = []
+            for line in (unified_diff or "").splitlines():
+                if not line.startswith("diff --git "):
+                    continue
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                b_path = parts[3]
+                if b_path.startswith("b/"):
+                    b_path = b_path[2:]
+                b_path = b_path.lstrip("/")
+                if b_path and b_path not in paths:
+                    paths.append(b_path)
+            return paths
+
+        def _allowed_by_prefix(path: str, prefixes: List[str]) -> bool:
+            p = (path or "").lstrip("/")
+            # hard blocks
+            if p in (".env",) or p.startswith(".git/"):
+                return False
+            for pref in prefixes:
+                pref = (pref or "").lstrip("/")
+                if not pref:
+                    continue
+                if pref.endswith("/"):
+                    if p.startswith(pref):
+                        return True
+                else:
+                    if p == pref or p.startswith(pref + "/"):
+                        return True
+            return False
 
         async def tool_spawn_agent(args: Dict[str, Any]) -> Dict[str, Any]:
             if not self.swarm:
@@ -258,6 +325,60 @@ class AgentOrchestrator:
             except Exception as e:
                 return {"ok": False, "error": str(e)}
 
+        async def tool_fs_apply_patch(args: Dict[str, Any]) -> Dict[str, Any]:
+            """
+            Apply a unified diff to the git workspace (safe allowlist + optional dry-run).
+            Uses `git apply` under the hood for correctness.
+            """
+            patch = args.get("patch")
+            check_only = bool(args.get("check_only", False))
+            max_files = int(args.get("max_files", 25))
+            if not isinstance(patch, str):
+                return {"ok": False, "error": "patch_must_be_string"}
+            if len(patch) > 500_000:
+                return {"ok": False, "error": "patch_too_large"}
+            max_files = max(1, min(max_files, 200))
+
+            paths = _extract_patch_paths(patch)
+            if not paths:
+                return {"ok": False, "error": "no_patch_paths_found"}
+            if len(paths) > max_files:
+                return {"ok": False, "error": "too_many_files", "count": len(paths), "max_files": max_files}
+
+            prefixes = _patch_prefixes()
+            denied = [p for p in paths if not _allowed_by_prefix(p, prefixes)]
+            if denied:
+                return {"ok": False, "error": "path_not_allowed", "denied": denied[:10], "allowed_prefixes": prefixes}
+
+            cmd = ["git", "apply"]
+            if check_only:
+                cmd.append("--check")
+            # Be tolerant of whitespace noise.
+            cmd.append("--whitespace=nowarn")
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(self.workspace_root),
+                    input=patch.encode("utf-8"),
+                    capture_output=True,
+                    timeout=8.0,
+                    check=False,
+                )
+                out = (proc.stdout or b"").decode("utf-8", errors="replace")
+                err = (proc.stderr or b"").decode("utf-8", errors="replace")
+                ok = proc.returncode == 0
+                return {
+                    "ok": ok,
+                    "check_only": check_only,
+                    "applied_files": paths,
+                    "exit_code": int(proc.returncode),
+                    "stdout": out[:20000],
+                    "stderr": err[:20000],
+                    "truncated": (len(out) > 20000 or len(err) > 20000),
+                }
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
         async def tool_http_get(args: Dict[str, Any]) -> Dict[str, Any]:
             url = str(args.get("url") or "").strip()
             max_bytes = int(args.get("max_bytes", 200_000))
@@ -363,6 +484,22 @@ class AgentOrchestrator:
                 },
             ),
             tool_fs_patch,
+        )
+        self.tools.register(
+            ToolSpec(
+                name="fs_apply_patch",
+                description="Apply a unified diff patch to the workspace (git apply, allowlisted paths).",
+                json_schema={
+                    "type": "object",
+                    "properties": {
+                        "patch": {"type": "string"},
+                        "check_only": {"type": "boolean"},
+                        "max_files": {"type": "integer", "minimum": 1, "maximum": 200},
+                    },
+                    "required": ["patch"],
+                },
+            ),
+            tool_fs_apply_patch,
         )
         self.tools.register(
             ToolSpec(
@@ -595,6 +732,7 @@ class AgentOrchestrator:
             "- If you need to inspect repo state, use fs_list/fs_read.\n"
             "- If you need to reference external docs, use http_get/http_get_json (host allowlist applies).\n"
             "- If you need to summarize changes you made, use git_status and git_diff (read-only).\n"
+            "- If you need to propose or apply code changes spanning multiple hunks/files, prefer fs_apply_patch (unified diff) and run it with check_only=true first.\n"
         )
         prompt = (
             f"{system}\n"
