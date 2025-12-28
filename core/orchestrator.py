@@ -288,7 +288,7 @@ class AgentOrchestrator:
                 # Non-fatal; continue.
                 pass
 
-        final = await self._finalize(agent, task)
+        final = await self._finalize(agent, task, policy)
         self.task_store.update_status(task.id, "completed", result=final)
         self.task_store.append_event(task.id, "completed", {"result": final[:5000]})
         await self._emit({"type": "task", "event": "completed", "task": self.task_store.get_task(task.id).to_dict()})
@@ -323,7 +323,7 @@ class AgentOrchestrator:
             self.task_store.append_event(task.id, "progress", {"note": f"planning_fallback:{e}"})
             return {"goal": task.title, "steps": [{"do": "Respond with an actionable summary"}]}
 
-    async def _finalize(self, agent: Any, task: Task) -> str:
+    async def _finalize(self, agent: Any, task: Task, policy: AgentPolicy) -> str:
         prompt = (
             f"Finalize this task for the requester.\n"
             f"Task: {task.title}\n"
@@ -331,7 +331,10 @@ class AgentOrchestrator:
             f"Return a concise deliverable and next steps.\n"
         )
         try:
-            return await asyncio.wait_for(agent.chat(prompt, user_id=str(task.created_by)), timeout=self.step_timeout_seconds)
+            return await asyncio.wait_for(
+                agent.chat(prompt, user_id=str(task.created_by)),
+                timeout=float(policy.step_timeout_seconds),
+            )
         except Exception as e:
             return f"Task completed, but finalization failed: {e}"
 

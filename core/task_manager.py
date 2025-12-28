@@ -197,7 +197,16 @@ class TaskStore:
             else:
                 cur = conn.execute("SELECT * FROM tasks ORDER BY created_at_ts DESC LIMIT ?", (limit,))
             rows = list(cur.fetchall())
-        return [self.get_task(str(r["id"])) for r in rows if r and r.get("id")]  # type: ignore[arg-type]
+        tasks: List[Task] = []
+        for r in rows:
+            try:
+                task_id = str(r["id"])
+            except Exception:
+                continue
+            t = self.get_task(task_id)
+            if t:
+                tasks.append(t)
+        return tasks
 
     def update_status(self, task_id: str, status: TaskStatus, *, result: Optional[str] = None, error: Optional[str] = None) -> Optional[Task]:
         now = time.time()

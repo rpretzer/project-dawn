@@ -31,6 +31,7 @@ from .moderation_store import ModerationStore
 from core.orchestrator import AgentOrchestrator
 from core.task_manager import TaskStore
 from core.agent_policy import AgentPolicy
+from core.evolution_engine import EvolutionEngine
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,7 @@ class RealtimeChatServer:
         self.task_store = TaskStore()
         self.orchestrator = AgentOrchestrator(agents=self.consciousnesses, swarm=self.swarm, task_store=self.task_store)
         self.moderation = ModerationStore()
+        self.evolution = EvolutionEngine(task_store=self.task_store, policy_store=self.orchestrator.policy_store)
 
         self._clients: Set[web.WebSocketResponse] = set()
         self._sessions: Dict[web.WebSocketResponse, ClientSession] = {}
@@ -573,6 +575,8 @@ class RealtimeChatServer:
             await self._system(
                 room,
                 "Commands: /help, /who, /join <room>, /agents, /ask <agent|all> <msg>, /spawn [n], /task <agent|all> <work>, /tasks"
+                + ", /rate <task_id> <1-5> [comment], /policy <agent_id> show|set …, /fitness [agent_id|all]"
+                + (", /evolve [agent_id|all]" if sess.is_admin else "")
                 + (" | Admin: /kick, /mute, /ban, /room" if sess.is_admin else ""),
             )
             return
@@ -817,6 +821,49 @@ class RealtimeChatServer:
                 await self._system(room, f"Policy updated for {agent_id}.")
                 return
             await self._system(room, "Usage: /policy <agent_id> show|set ...")
+            return
+
+        if cmd == "/fitness":
+            # /fitness [agent_id|all]
+            target = parts[1].strip() if len(parts) >= 2 else "all"
+            agents = self._select_agents(target) if target.lower() != "all" else list(self.consciousnesses)
+            if not agents:
+                await self._system(room, f"No matching agent for '{target}'. Try /agents.")
+                return
+            lines: List[str] = []
+            for a in agents:
+                aid = str(getattr(a, "id", "agent"))
+                rep = self.evolution.evaluate_agent(aid)
+                lines.append(
+                    f"{aid} score={rep.score:.3f} tasks={rep.window_tasks} ok={rep.completed} fail={rep.failed} "
+                    f"avg_rating={(f'{rep.avg_rating:.2f}' if rep.avg_rating is not None else 'n/a')} "
+                    f"median_s={(f'{rep.median_duration_s:.1f}' if rep.median_duration_s is not None else 'n/a')}"
+                )
+            await self._system(room, "Fitness:\n" + "\n".join(lines))
+            return
+
+        if cmd == "/evolve":
+            # /evolve [agent_id|all] (admin)
+            if not sess.is_admin:
+                await self._system(room, "Permission denied.")
+                return
+            target = parts[1].strip() if len(parts) >= 2 else "all"
+            agents = self._select_agents(target) if target.lower() != "all" else list(self.consciousnesses)
+            if not agents:
+                await self._system(room, f"No matching agent for '{target}'. Try /agents.")
+                return
+            lines: List[str] = []
+            for a in agents:
+                aid = str(getattr(a, "id", "agent"))
+                rep, old, new = self.evolution.evolve_agent(aid)
+                lines.append(
+                    f"{aid} score={rep.score:.3f} "
+                    f"policy: steps {old.max_plan_steps}->{new.max_plan_steps}, tools {old.max_tool_calls}->{new.max_tool_calls}, "
+                    f"timeout {old.step_timeout_seconds:.0f}->{new.step_timeout_seconds:.0f}s, "
+                    f"delegation {old.delegation_bias:.2f}->{new.delegation_bias:.2f}, "
+                    f"verbosity {old.verbosity}->{new.verbosity}"
+                )
+            await self._system(room, "Evolution applied:\n" + "\n".join(lines))
             return
 
         if cmd == "/task":
