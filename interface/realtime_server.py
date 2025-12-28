@@ -264,6 +264,32 @@ def _read_text_file(root: Path, rel_path: str, *, max_bytes: int = 100_000) -> D
     return {"ok": True, "path": str(p.relative_to(root)), "content": text, "truncated": truncated}
 
 
+def _git_apply_stat(*, repo_root: Path, patch_text: str) -> Dict[str, Any]:
+    """
+    Return a `git apply --stat` preview (no changes made).
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "apply", "--stat", "--whitespace=nowarn"],
+            cwd=str(repo_root),
+            input=(patch_text or "").encode("utf-8"),
+            capture_output=True,
+            timeout=8.0,
+            check=False,
+        )
+        out = (proc.stdout or b"").decode("utf-8", errors="replace")
+        err = (proc.stderr or b"").decode("utf-8", errors="replace")
+        return {
+            "ok": proc.returncode == 0,
+            "exit_code": int(proc.returncode),
+            "stdout": out[:20000],
+            "stderr": err[:20000],
+            "truncated": (len(out) > 20000 or len(err) > 20000),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def _is_command(text: str) -> bool:
     return text.strip().startswith("/")
 
@@ -945,6 +971,37 @@ class RealtimeChatServer:
                 )
             except Exception as e:
                 await self._send(ws, {"type": "patch_check", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
+            return
+
+        if msg_type == "stat_patch":
+            if not sess.is_admin:
+                await self._send(ws, {"type": "error", "error": "permission_denied"})
+                return
+            patch_path = str(payload.get("patch_path") or "").strip()
+            if not patch_path:
+                await self._send(ws, {"type": "error", "error": "patch_path_required"})
+                return
+            if not _is_allowed_read_path(patch_path, self.patch_apply_prefixes):
+                await self._send(ws, {"type": "error", "error": "path_not_allowed"})
+                return
+            try:
+                read_res = _read_text_file(self.workspace_root, patch_path, max_bytes=500_000)
+                if not read_res.get("ok"):
+                    await self._send(ws, {"type": "error", "error": read_res.get("error") or "read_failed"})
+                    return
+                patch_text = str(read_res.get("content") or "")
+                stat = _git_apply_stat(repo_root=self.workspace_root, patch_text=patch_text)
+                await self._send(
+                    ws,
+                    {
+                        "type": "patch_stat",
+                        "patch_path": patch_path,
+                        "ts": time.time(),
+                        **stat,
+                    },
+                )
+            except Exception as e:
+                await self._send(ws, {"type": "patch_stat", "ok": False, "patch_path": patch_path, "error": str(e), "ts": time.time()})
             return
 
         if msg_type == "apply_patch":
@@ -2122,6 +2179,14 @@ _INDEX_HTML = r"""<!doctype html>
           patchOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '') + extra;
           return;
         }
+        if (msg.type === 'patch_stat') {
+          const head = `patch_stat ${msg.ok ? 'OK' : 'FAIL'} (exit=${msg.exit_code ?? 'n/a'})\\n`;
+          const out = (msg.stdout || '').trim();
+          const err = (msg.stderr || '').trim();
+          const extra = msg.error ? (`\\nerror: ${msg.error}`) : '';
+          patchOutEl.textContent = head + (out ? out : '') + (err ? ('\\n\\n[stderr]\\n' + err) : '') + extra;
+          return;
+        }
         if (msg.type === 'git_status' || msg.type === 'git_diff') {
           const r = msg.result || {};
           const head = `${r.cmd || 'git'} (exit=${r.exit_code})${r.truncated ? ' [truncated]' : ''}\\n`;
@@ -2192,6 +2257,22 @@ _INDEX_HTML = r"""<!doctype html>
       patchOutEl.textContent = 'Checking patch…';
       try { ws?.send(JSON.stringify({type:'check_patch', patch_path: selectedFilePath})); } catch {}
     };
+    // Preview summary via git apply --stat
+    const patchStatBtn = document.createElement('button');
+    patchStatBtn.className = 'miniBtn';
+    patchStatBtn.textContent = 'stat patch';
+    patchStatBtn.onclick = () => {
+      if (!selectedFilePath || !selectedFilePath.endsWith('.patch')) {
+        patchOutEl.textContent = 'Select a .patch artifact file first.';
+        return;
+      }
+      patchOutEl.textContent = 'Generating patch stat…';
+      try { ws?.send(JSON.stringify({type:'stat_patch', patch_path: selectedFilePath})); } catch {}
+    };
+    // Insert between check and apply (buttons exist in DOM already).
+    try {
+      patchCheckBtn.parentElement?.insertBefore(patchStatBtn, patchApplyBtn);
+    } catch {}
     patchApplyBtn.onclick = () => {
       if (!selectedFilePath || !selectedFilePath.endsWith('.patch')) {
         patchOutEl.textContent = 'Select a .patch artifact file first.';
