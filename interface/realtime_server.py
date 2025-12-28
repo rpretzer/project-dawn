@@ -115,6 +115,20 @@ def _truncate_message(text: str, limit: int = 4000) -> str:
     return text
 
 
+def _rate_allow(q: deque, *, now: float, window_seconds: float, limit: int) -> bool:
+    """
+    Sliding-window rate limiter helper (mutates q).
+    """
+    window_seconds = float(window_seconds)
+    limit = int(limit)
+    while q and q[0] < now - window_seconds:
+        q.popleft()
+    if len(q) >= limit:
+        return False
+    q.append(now)
+    return True
+
+
 def _task_public(t: Task) -> Dict[str, Any]:
     """
     Public-safe task shape for the web UI.
@@ -338,6 +352,12 @@ class RealtimeChatServer:
         # Simple IP rate limit for auth endpoints (best-effort)
         self.max_auth_per_minute = int(os.getenv("CHAT_MAX_AUTH_PER_MINUTE", "10"))
         self._auth_rate: Dict[str, deque] = defaultdict(lambda: deque(maxlen=64))  # ip -> timestamps
+
+        # WS action rate limits (task creation + ratings bypass chat limiter, so limit separately)
+        self.max_tasks_per_minute_human = int(os.getenv("CHAT_MAX_TASKS_PER_MINUTE_HUMAN", "8"))
+        self.max_tasks_per_minute_guest = int(os.getenv("CHAT_MAX_TASKS_PER_MINUTE_GUEST", "2"))
+        self.max_ratings_per_minute = int(os.getenv("CHAT_MAX_RATINGS_PER_MINUTE", "20"))
+        self._action_rate: Dict[str, deque] = defaultdict(lambda: deque(maxlen=128))  # key:action -> timestamps
 
         # Policy defaults
         self.allow_guests_default = os.getenv("CHAT_ALLOW_GUESTS", "true" if ENV != "prod" else "false").lower() == "true"
@@ -593,12 +613,10 @@ class RealtimeChatServer:
     def _check_auth_rate_limit(self, ip: str) -> bool:
         now = time.time()
         q = self._auth_rate[ip]
-        while q and q[0] < now - 60:
-            q.popleft()
-        if len(q) >= self.max_auth_per_minute:
-            return False
-        q.append(now)
-        return True
+        return _rate_allow(q, now=now, window_seconds=60.0, limit=self.max_auth_per_minute)
+
+    def _rate_limit_key(self, sess: ClientSession) -> str:
+        return sess.sender_id if sess.sender_id else f"guest:{sess.sender_name}"
 
     async def http_register(self, request: web.Request) -> web.Response:
         if not self._check_origin(request):
@@ -820,6 +838,12 @@ class RealtimeChatServer:
             if not prompt:
                 await self._send(ws, {"type": "error", "error": "prompt_required"})
                 return
+            now = time.time()
+            who = self._rate_limit_key(sess)
+            limit = self.max_tasks_per_minute_human if sess.sender_type == "human" else self.max_tasks_per_minute_guest
+            if not _rate_allow(self._action_rate[f"{who}:create_task"], now=now, window_seconds=60.0, limit=limit):
+                await self._send(ws, {"type": "error", "error": "rate_limited"})
+                return
             await self._create_tasks(room, sess, target, prompt)
             # Nudge clients to refresh tasks.
             tasks = [_task_public(t) for t in self.task_store.list_recent(room=room, limit=50) if t]
@@ -845,6 +869,11 @@ class RealtimeChatServer:
                 return
             if t.room != sess.room and not sess.is_admin:
                 await self._send(ws, {"type": "error", "error": "not_in_task_room"})
+                return
+            now = time.time()
+            who = self._rate_limit_key(sess)
+            if not _rate_allow(self._action_rate[f"{who}:rate_task"], now=now, window_seconds=60.0, limit=self.max_ratings_per_minute):
+                await self._send(ws, {"type": "error", "error": "rate_limited"})
                 return
             try:
                 self.task_store.record_rating(
