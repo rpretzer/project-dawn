@@ -16,8 +16,8 @@ This document evaluates a proposed phased implementation plan to migrate Project
 - Application launches as standalone `.exe/.app` binary
 
 **Current State Alignment**:
-✅ We have a working Python server (`v2/server_p2p.py`)
-✅ We have a browser-based frontend (`v2/frontend/`)
+✅ We have a working Python server (`server_p2p.py`)
+✅ We have a browser-based frontend (`frontend/`)
 ✅ We have WebSocket communication already established
 ✅ The architecture already separates frontend from backend
 
@@ -372,6 +372,5 @@ I understand the proposed plan and its alignment with our current architecture. 
 **Document Version**: 1.0  
 **Created**: 2026-01-08  
 **Status**: Evaluation Complete - Ready for Discussion
-
 
 

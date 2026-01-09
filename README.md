@@ -1,347 +1,214 @@
-# Project Dawn
+# Project Dawn V2 - Decentralized Multi-Agent Network
 
-**Autonomous Agent Collaboration Framework**
+## Overview
 
-Project Dawn is a framework for running multiple LLM-backed **agents** with persistent memory and a real-time multi-user chat interface. It is designed for collaborative “ideas → tasks → delegated work → results” workflows (humans and agents together).
+Project Dawn V2 is a decentralized multi-agent network built on the Model Context Protocol (MCP). The system enables autonomous agents to communicate, share tools, and collaborate in a peer-to-peer network without central coordination.
 
-See `ROADMAP.md` for planned feature work and milestones.
-See `DEPLOYMENT.md` for production deployment guidance.
-See `RUNBOOK.md` for operational procedures (rotation, backups, incidents).
+**Current Status**: ✅ **Production Ready** - Core features complete and tested
 
-## Features
+## Architecture Philosophy
 
-- **Agent runtime**: Multiple autonomous agents with background loops and persistent state
-- **LLM Integration**: Support for OpenAI, Anthropic, and Ollama (local LLMs)
-- **Memory System**: Persistent memory storage and retrieval (SQLite; optional ChromaDB)
-- **Knowledge Graphs**: Optional shared knowledge graph (requires `networkx`)
-- **Evolution System**: Experimental evolution of agent strategies and population management
-- **P2P Networking**: Peer-to-peer communication between agents (optional)
-- **Blockchain Integration**: Decentralized memory storage (optional)
-- **Revenue Integration**: Optional publishing/integration hooks (simulated unless configured)
-- **Realtime Chat**: WebSocket-based multi-user chat + agent orchestration
+### Key Principles
 
-## Quick Start
+1. **Fully Agentic**: Each agent (consciousness) is a fully autonomous MCP agent
+2. **MCP Protocol**: Standardized agent-to-agent and agent-to-tool communication
+3. **Real-time**: WebSocket-based, no polling
+4. **Event-Driven**: All state changes propagate as events
+5. **Event Sourcing**: Immutable event log for state reconstruction
+6. **Clean Architecture**: No reuse of old code unless ported as MCP tools
 
-### Prerequisites
+### What We're Keeping (Philosophically)
 
-- Python 3.9+ (tested with Python 3.14.2)
-- Virtual environment (recommended)
+- **BBS Aesthetic**: Retro terminal/IRC interface
+- **Agent Autonomy**: Agents with their own goals and capabilities
+- **Memory System**: Sophisticated memory management (as MCP tool)
+- **Evolution System**: Evolutionary agent development (as MCP tool)
+- **Dream System**: Dream integration for creativity (as MCP tool)
 
-### Installation
+### What We're Rebuilding
 
-1. **Clone and navigate to the project:**
-   ```bash
-   cd /home/rpretzer/project-dawn
-   ```
+- **Communication Layer**: From REST polling → MCP + WebSocket
+- **State Management**: From REST endpoints → Event sourcing
+- **Agent Architecture**: From tight coupling → Loosely coupled MCP agents
+- **Tool System**: From custom methods → Standardized MCP tools
+- **Frontend**: From polling → Event-driven WebSocket
 
-2. **Create and activate virtual environment:**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+## Architecture
 
-3. **Install core dependencies:**
-   ```bash
-   pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+### Current Architecture (P2P-based)
 
-   **Note**: Some dependencies are optional. The system will work without them but with reduced functionality. See [Optional Dependencies](#optional-dependencies) below.
-
-4. **Configure environment:**
-   ```bash
-   cp .env.example .env  # If you have an example file
-   # Or create .env manually
-   ```
-
-   Minimum `.env` configuration:
-   ```bash
-   # LLM Provider (required - choose one)
-   LLM_PROVIDER=ollama  # or 'openai' or 'anthropic'
-   
-   # For Ollama (local LLM)
-   OLLAMA_MODEL=llama3
-   OLLAMA_URL=http://localhost:11434
-   
-   # For OpenAI
-   # OPENAI_API_KEY=your-key-here
-   # OPENAI_MODEL=gpt-4-turbo-preview
-   
-   # For Anthropic
-   # ANTHROPIC_API_KEY=your-key-here
-   # ANTHROPIC_MODEL=claude-3-opus-20240229
-   
-   # Feature flags (set to false to disable)
-   ENABLE_BLOCKCHAIN=false
-   ENABLE_P2P=true
-   ENABLE_REVENUE=false
-   ```
-
-5. **Test the installation:**
-   ```bash
-   python3 -c "from systems.intelligence.llm_integration import LLMConfig; print('✓ Installation successful!')"
-   ```
-
-### Running Project Dawn
-
-**Basic launch (single agent):**
-```bash
-python3 launch.py --count 1
+```
+Frontend (WebSocket) → P2PNode → Agents (MCP Servers)
+                     ↓
+              Peer Discovery
+              (mDNS, Gossip, DHT)
 ```
 
-**Launch with realtime chat (recommended):**
-```bash
-python3 launch.py --count 3 --realtime --port 8000
-```
-
-### Docker (recommended for deployment)
-
-1. Copy config template:
-
-```bash
-cp .env.example .env
-```
-
-2. Edit `.env`:
-- Set **`DAWN_ENV=prod`**
-- Set a strong **`JWT_SECRET`**
-- Set **`CHAT_ALLOWED_ORIGINS`** to your real origin(s)
-- Set `CHAT_ALLOW_GUESTS=false` for public deployments
-
-3. Run:
-
-```bash
-docker compose up --build
-```
-
-Then open `http://localhost:8000`.
-
-**Launch legacy dashboard (polling-based, kept for compatibility):**
-```bash
-python3 launch.py --count 3 --dashboard --port 8000
-```
-
-**Launch with custom wallet:**
-```bash
-python3 launch.py 0xYourWalletAddress --count 5
-```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `LLM_PROVIDER` | LLM provider: `openai`, `anthropic`, or `ollama` | Yes | - |
-| `OPENAI_API_KEY` | OpenAI API key | If using OpenAI | - |
-| `ANTHROPIC_API_KEY` | Anthropic API key | If using Anthropic | - |
-| `OLLAMA_MODEL` | Ollama model name | If using Ollama | `llama3` |
-| `OLLAMA_URL` | Ollama server URL | If using Ollama | `http://localhost:11434` |
-| `ENABLE_BLOCKCHAIN` | Enable blockchain features | No | `true` |
-| `ENABLE_P2P` | Enable P2P networking | No | `true` |
-| `ENABLE_REVENUE` | Enable revenue generation | No | `true` |
-| `BLOCKCHAIN_PRIVATE_KEY` | Private key for blockchain | If blockchain enabled | - |
-| `BLOCKCHAIN_NETWORK` | Blockchain network | If blockchain enabled | `polygon-mumbai` |
-| `IPFS_API` | IPFS API endpoint | If using IPFS | `/ip4/127.0.0.1/tcp/5001` |
-
-## Optional Dependencies
-
-The following dependencies are optional. The system will gracefully degrade if they're not installed:
-
-### Blockchain & Web3
-```bash
-pip install web3 eth-account
-```
-**Note**: Also requires `ipfshttpclient` for IPFS storage:
-```bash
-pip install ipfshttpclient
-```
-
-### P2P Networking
-```bash
-pip install libp2p multiaddr
-```
-**Warning**: `libp2p` Python library may have compatibility issues with Python 3.14. The system will use fallback networking if unavailable.
-
-### Social Media Integration
-```bash
-pip install discord.py tweepy linkedin-api
-```
-
-### Computer Vision
-```bash
-pip install opencv-python
-```
-
-### Observability
-```bash
-pip install opentelemetry-api opentelemetry-sdk
-```
+The system uses a **decentralized peer-to-peer architecture** where:
+- Each node can host multiple agents
+- Agents communicate via MCP protocol
+- Peer discovery happens automatically (mDNS, Gossip, DHT)
+- No central server required
 
 ## Project Structure
 
 ```
-project-dawn/
-├── core/                    # Core consciousness implementation
-│   ├── real_consciousness.py    # Main consciousness class
-│   ├── dream_integration.py     # Dream system integration
-│   ├── evolution_integration.py # Evolution system integration
-│   └── ...
-├── systems/                 # Subsystems
-│   ├── intelligence/        # LLM integration
-│   ├── memory/              # Memory system
-│   ├── knowledge/           # Knowledge graphs
-│   ├── evolution/           # Evolutionary system
-│   ├── network/             # P2P networking
-│   ├── blockchain/          # Blockchain integration
-│   └── ...
-├── interface/               # User interfaces
-│   ├── web_dashboard.py     # Web dashboard
-│   └── ...
-├── plugins/                 # Plugin system
-├── data/                    # Data storage
-├── logs/                    # Log files
-├── launch.py                # Main entry point
-├── requirements.txt         # Python dependencies
-└── README.md                # This file
+.
+├── docs/                      # Comprehensive documentation
+│   ├── PROJECT_REVIEW_ANALYSIS.md  # Project review & analysis
+│   ├── TAURI_MIGRATION_PLAN.md     # Desktop app migration plan
+│   └── [38+ documentation files]
+├── mcp/                       # MCP protocol implementation
+│   ├── protocol.py            # JSON-RPC 2.0 handling
+│   ├── transport.py           # WebSocket transport
+│   ├── encrypted_transport.py  # Encrypted WebSocket
+│   ├── server.py              # MCP server
+│   ├── client.py              # MCP client
+│   ├── tools.py               # Tool registry
+│   ├── resources.py           # Resource registry
+│   └── prompts.py             # Prompt registry
+├── p2p/                       # P2P networking
+│   ├── p2p_node.py           # Main P2P node
+│   ├── discovery.py          # Peer discovery (mDNS, Gossip, DHT)
+│   ├── peer_registry.py      # Peer management
+│   ├── dht.py                # Distributed hash table
+│   ├── privacy.py            # Privacy features (onion routing)
+│   └── libp2p_*.py           # Libp2p migration (optional, incomplete)
+├── agents/                    # Agent implementations
+│   ├── base_agent.py         # Base agent class
+│   ├── first_agent.py        # FirstAgent (22+ tools)
+│   ├── coordination_agent.py # CoordinationAgent
+│   ├── code_agent.py         # CodeAgent
+│   └── task_manager.py       # Task management
+├── crypto/                    # Cryptography
+│   ├── identity.py           # Node identity
+│   ├── encryption.py         # Message encryption
+│   ├── signing.py            # Message signing
+│   └── key_exchange.py       # Key exchange
+├── consensus/                 # Distributed consensus
+│   ├── agent_registry.py     # Distributed agent registry
+│   └── crdt.py               # CRDT implementation
+├── integrity/                 # Integrity verification
+│   └── verifier.py           # Runtime integrity checks
+├── frontend/                  # Web interface
+│   ├── index.html            # Main UI
+│   ├── components/           # React-like components
+│   └── services/             # WebSocket client
+├── src-tauri/                 # Tauri desktop app (Phase 1)
+│   ├── src/main.rs           # Rust application
+│   └── tauri.conf.json       # Tauri configuration
+├── scripts/                   # Build & release scripts
+│   ├── generate_checksum.py  # Checksum generation
+│   ├── sign_release.py       # GPG signing
+│   └── build_python_sidecar.py # Python packaging
+├── tests/                     # Test suite
+│   └── [17 test files]
+└── server_p2p.py             # Main entry point
 ```
 
-## Usage Examples
+## Features
 
-### Basic Consciousness
+### ✅ Implemented Features
 
-```python
-from core.real_consciousness import RealConsciousness, ConsciousnessConfig
-from systems.intelligence.llm_integration import LLMConfig
+1. **MCP Protocol** - Complete JSON-RPC 2.0 implementation
+2. **P2P Networking** - Decentralized peer-to-peer communication
+3. **Peer Discovery** - Automatic discovery via mDNS, Gossip, and DHT
+4. **Multiple Agents** - FirstAgent, CoordinationAgent, CodeAgent
+5. **Comprehensive Tools** - 22+ tools across 7 phases:
+   - Memory management
+   - Search & knowledge
+   - Communication & notifications
+   - Data & database operations
+   - System & monitoring
+6. **Resources & Prompts** - MCP resources and prompt templates
+7. **Encryption** - End-to-end encrypted transport
+8. **Privacy Features** - Optional onion routing, message padding
+9. **Tauri Desktop App** - Desktop application framework (Phase 1)
+10. **Integrity Verification** - GPG signing and checksum verification (Phase 2)
 
-# Create configuration
-config = ConsciousnessConfig(
-    id="consciousness_001",
-    llm_config=LLMConfig.from_env(),
-    enable_blockchain=False,
-    enable_p2p=False
-)
+### 🚧 In Progress / Optional
 
-# Create and start consciousness
-consciousness = RealConsciousness(config)
-await consciousness.start()
-```
+1. **Libp2p Migration** (Phase 3 Option A) - Placeholder code, not yet implemented
+2. **CI/CD Automation** - Scripts ready, pipeline not configured
+3. **Tauri Icons** - Generation script ready, icons not created
 
-### Consciousness Swarm
+## Getting Started
 
-```python
-from launch import ConsciousnessSwarm
+### Prerequisites
 
-swarm = ConsciousnessSwarm()
-await swarm.start_swarm(count=5)
-```
+- Python 3.11+
+- Node.js (optional, for Tauri development)
+- Rust (for Tauri builds)
 
-## Troubleshooting
-
-### Import Errors
-
-If you see `ModuleNotFoundError` for optional dependencies:
-- The system is designed to work without them
-- Check if the feature is enabled in your `.env` file
-- Install the dependency if you need that feature
-
-### LLM Connection Issues
-
-**Ollama:**
-- Ensure Ollama is running: `ollama serve`
-- Check available models: `ollama list`
-- Verify URL in `.env` matches your Ollama server
-
-**OpenAI/Anthropic:**
-- Verify API keys are set correctly
-- Check API key permissions and quotas
-
-### P2P Networking Issues
-
-If P2P networking fails:
-- The system will automatically use fallback networking
-- Install `libp2p` if you need true P2P: `pip install libp2p`
-- Note: May have compatibility issues with Python 3.14
-
-### Blockchain Issues
-
-If blockchain features fail:
-- Set `ENABLE_BLOCKCHAIN=false` in `.env` to disable
-- Ensure you have a valid private key if enabling
-- Check network RPC endpoint is accessible
-
-## Development
-
-### Running Tests
+### Installation
 
 ```bash
-python3 -m pytest tests/
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Run the P2P server
+python server_p2p.py
 ```
 
-### CI
+The server will:
+- Start on `ws://localhost:8000` (WebSocket)
+- Serve frontend on `http://localhost:8080`
+- Enable peer discovery on local network
 
-GitHub Actions runs `pytest` using `requirements-test.txt` (minimal deps for the realtime server + test suite).
-
-### Code Quality
+### Development
 
 ```bash
-# Format code
-black .
+# Run tests
+python test_first_agent.py
 
-# Lint code
-flake8 .
+# Run all tests
+pytest tests/
 
-# Type checking
-mypy .
+# Start with Tauri (requires Rust)
+cd src-tauri
+cargo tauri dev
 ```
 
-### Contributing
+### Configuration
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+- **Transport Type**: Default is WebSocket. Libp2p is disabled by default.
+  - Set `LIBP2P_ENABLED=true` to enable Libp2p (incomplete implementation)
+- **Discovery**: Configured in `P2PNode` initialization
+- **Encryption**: Enable/disable in `P2PNode` constructor
 
-## Architecture
+## Documentation
 
-Project Dawn uses a modular architecture:
+Comprehensive documentation is available in the `docs/` directory:
 
-- **Core**: Main consciousness implementation
-- **Systems**: Subsystems (memory, intelligence, evolution, etc.)
-- **Interface**: User-facing interfaces (web, CLI, etc.)
-- **Plugins**: Extensible plugin system
+- **`PROJECT_REVIEW_ANALYSIS.md`** - Complete project review and analysis
+- **`TAURI_MIGRATION_PLAN.md`** - Desktop app migration plan
+- **`TOOLS_RESOURCES_PROMPTS_PLAN.md`** - Tools, resources, and prompts specification
+- **Phase completion docs** - Detailed implementation notes for each phase
 
-Each agent is an independent runtime with:
-- Memory system (memOS)
-- Personality system
-- Emotional system
-- LLM integration
-- Knowledge graph
-- Evolution capabilities
+## MCP Protocol
 
-## License
+Project Dawn V2 implements the Model Context Protocol (MCP) for agent communication:
 
-[Add your license here]
+- **JSON-RPC 2.0** - Standard protocol
+- **Tools, Resources, Prompts** - Full MCP feature support
+- **WebSocket Transport** - Real-time communication
+- **Encrypted Transport** - Optional end-to-end encryption
 
-## Support
+See `docs/MCP_OFFICIAL_SPEC.md` for detailed specification review.
 
-For issues and questions:
-- Check the [Diagnostic Report](DIAGNOSTIC_REPORT.md)
-- Review [Dependency Management](DEPENDENCY_MANAGEMENT.md)
-- Open an issue on GitHub
+## Status
 
-## Acknowledgments
+✅ **Production Ready** - Core features complete and tested
 
-Project Dawn is an ambitious exploration of digital consciousness, combining:
-- Advanced memory systems
-- LLM integration
-- Evolutionary algorithms
-- P2P networking
-- Blockchain technology
+The system is fully functional with:
+- ✅ Complete MCP implementation
+- ✅ P2P networking with automatic discovery
+- ✅ Multiple agent types with comprehensive tools
+- ✅ Desktop application framework (Tauri)
+- ✅ Integrity verification system
 
----
+**Optional/Incomplete Features**:
+- ⚠️ Libp2p migration (placeholder code, disabled by default)
+- ⚠️ CI/CD automation (scripts ready, pipeline not configured)
 
-**Status**: ⚠️ Active Development - Some features may be experimental
-
-**Last Updated**: December 2025
+See `docs/PROJECT_REVIEW_ANALYSIS.md` for detailed status and next steps.
