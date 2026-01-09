@@ -1,0 +1,41 @@
+name: Test Suite
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          cd v2
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+      
+      - name: Run tests
+        run: |
+          cd v2
+          python test_first_agent.py
+          pytest tests/ -v
+      
+      - name: Check imports
+        run: |
+          cd v2
+          python -c "from p2p import P2PNode; from agents import FirstAgent; print('✓ Imports work')"

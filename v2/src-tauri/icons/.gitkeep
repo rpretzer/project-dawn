@@ -1,0 +1,15 @@
+# Placeholder for Tauri icons
+# 
+# Tauri requires icons in multiple sizes:
+# - 32x32.png
+# - 128x128.png
+# - 128x128@2x.png (256x256)
+# - 256x256.png
+# - 256x256@2x.png (512x512)
+# - 512x512.png
+# - 512x512@2x.png (1024x1024)
+#
+# You can generate these from a single high-resolution icon using:
+# - ImageMagick: convert icon.png -resize 32x32 icons/32x32.png
+# - Online tools: https://www.icoconverter.com/
+# - Or use a tool like: https://github.com/tauri-apps/tauri-icon

@@ -277,8 +277,8 @@ class RelationalDBBackend(StorageBackend):
         
         # Temporal filter
         if "temporal_scope" in query:
-            temporal = query["temporal_scope"]
-            if temporal.get("type") == "relative":
+            temporal = query.get("temporal_scope") or {}
+            if isinstance(temporal, dict) and temporal.get("type") == "relative":
                 time_ago = time.time() - (temporal["value"] * 
                     (3600 if temporal["unit"] == "hours" else 86400))
                 conditions.append("timestamp > ?")

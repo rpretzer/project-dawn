@@ -1,0 +1,15 @@
+# Rust
+target/
+Cargo.lock
+
+# Tauri
+src-tauri/target/
+
+# Sidecar
+sidecar/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo

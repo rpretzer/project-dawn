@@ -118,9 +118,7 @@ class MemorySystem:
                 {"consciousness_id": self.consciousness_id, **context}
             )
         except Exception as e:
-            logger.error(f"Error in recall: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
+            logger.exception(f"Error in recall: {e}")
             return []  # Return empty list on error
     
     async def update(self, memory_id: str, updates: Dict[str, Any]) -> bool:

@@ -256,9 +256,27 @@ class DreamIntegration:
         
     def _get_current_emotions(self) -> Dict[str, float]:
         """Get current emotional state"""
-        if hasattr(self.consciousness, 'emotional_state'):
-            return self.consciousness.emotional_state
-        return {}
+        if not hasattr(self.consciousness, 'emotional_state'):
+            return {}
+        state = self.consciousness.emotional_state
+        if state is None:
+            return {}
+        if hasattr(state, "get_emotional_summary"):
+            try:
+                summary = state.get_emotional_summary()
+                if isinstance(summary, dict):
+                    return summary
+            except Exception:
+                return {}
+        if isinstance(state, dict):
+            return state
+        # Fallback: map attributes to a simple dict
+        return {
+            "primary_emotion": getattr(state, "primary_emotion", "neutral"),
+            "intensity": getattr(state, "intensity", 0.5),
+            "valence": getattr(state, "valence", 0.0),
+            "arousal": getattr(state, "arousal", 0.5),
+        }
         
     def _identify_current_problems(self) -> List[str]:
         """Identify problems that need solving"""
@@ -271,10 +289,15 @@ class DreamIntegration:
                     problems.append(f"How to achieve: {goal}")
                     
         # Check for revenue challenges
-        if hasattr(self.consciousness, 'revenue_generator'):
-            stats = self.consciousness.revenue_generator.get_revenue_stats()
-            if stats['total_revenue'] < 100:  # Low revenue
-                problems.append("How to increase revenue generation")
+        rev_gen = getattr(self.consciousness, 'revenue_generator', None)
+        if rev_gen and hasattr(rev_gen, 'get_revenue_stats'):
+            try:
+                stats = rev_gen.get_revenue_stats()
+                if isinstance(stats, dict) and stats.get('total_revenue', 0) < 100:
+                    problems.append("How to increase revenue generation")
+            except Exception:
+                # Revenue system optional; ignore if unavailable
+                pass
                 
         # Check for social challenges
         if hasattr(self.consciousness, 'relationships'):

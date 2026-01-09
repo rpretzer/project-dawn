@@ -73,6 +73,8 @@ class LLMConfig:
     def from_env(cls, provider: Optional[str] = None) -> 'LLMConfig':
         """Create config from environment variables"""
         provider = provider or os.getenv('LLM_PROVIDER', 'openai')
+        default_timeout = int(os.getenv('LLM_TIMEOUT', '30'))
+        ollama_timeout = int(os.getenv('OLLAMA_TIMEOUT', '120'))
         
         configs = {
             'openai': cls(
@@ -81,7 +83,8 @@ class LLMConfig:
                 api_key=os.getenv('OPENAI_API_KEY'),
                 endpoint_url='https://api.openai.com/v1',
                 temperature=float(os.getenv('LLM_TEMPERATURE', '0.7')),
-                max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000'))
+                max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000')),
+                timeout=default_timeout,
             ),
             'anthropic': cls(
                 provider=LLMProvider.ANTHROPIC,
@@ -89,21 +92,24 @@ class LLMConfig:
                 api_key=os.getenv('ANTHROPIC_API_KEY'),
                 endpoint_url='https://api.anthropic.com/v1',
                 temperature=float(os.getenv('LLM_TEMPERATURE', '0.7')),
-                max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000'))
+                max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000')),
+                timeout=default_timeout,
             ),
             'local': cls(
                 provider=LLMProvider.LOCAL,
                 model=os.getenv('LOCAL_MODEL', 'llama2'),
                 endpoint_url=os.getenv('LOCAL_LLM_URL', 'http://localhost:11434'),
                 temperature=float(os.getenv('LLM_TEMPERATURE', '0.7')),
-                max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000'))
+                max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000')),
+                timeout=default_timeout,
             ),
             'ollama': cls(
                 provider=LLMProvider.OLLAMA,
                 model=os.getenv('OLLAMA_MODEL', 'llama2'),
                 endpoint_url=os.getenv('OLLAMA_URL', 'http://localhost:11434'),
                 temperature=float(os.getenv('LLM_TEMPERATURE', '0.7')),
-                max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000'))
+                max_tokens=int(os.getenv('LLM_MAX_TOKENS', '2000')),
+                timeout=ollama_timeout,
             )
         }
         
@@ -812,6 +818,7 @@ class OllamaProvider(BaseLLMProvider):
         data = {
             'model': self.config.model,
             'prompt': prompt,
+            'stream': False,  # request a single JSON response
             'options': {
                 'temperature': kwargs.get('temperature', self.config.temperature),
                 'top_p': kwargs.get('top_p', self.config.top_p),
@@ -825,7 +832,25 @@ class OllamaProvider(BaseLLMProvider):
                 json=data,
                 timeout=aiohttp.ClientTimeout(total=self.config.timeout)
             ) as response:
-                response_data = await response.json()
+                # Ollama defaults to NDJSON streaming; handle both JSON and NDJSON
+                content_type = response.headers.get('Content-Type', '')
+                if 'application/x-ndjson' in content_type:
+                    full_text = ""
+                    async for line in response.content:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if 'response' in chunk:
+                            full_text += chunk['response']
+                        if chunk.get('done'):
+                            break
+                    response_data = {'response': full_text}
+                else:
+                    response_data = await response.json()
                 
                 if response.status != 200:
                     raise Exception(f"Ollama API error: {response_data}")
@@ -849,9 +874,21 @@ class OllamaProvider(BaseLLMProvider):
                     finish_reason='stop'
                 )
                 
+        except asyncio.TimeoutError as e:
+            self.circuit_breaker.call_failed()
+            logger.warning(f"Ollama timeout after {self.config.timeout}s: {e}")
+            # Return a graceful fallback so the loop continues
+            return LLMResponse(
+                content="(local LLM timeout)",
+                model=self.config.model,
+                provider=LLMProvider.OLLAMA,
+                usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                latency_ms=(time.time() - start_time) * 1000,
+                finish_reason='timeout'
+            )
         except Exception as e:
             self.circuit_breaker.call_failed()
-            logger.error(f"Ollama API error: {e}")
+            logger.exception(f"Ollama API error: {e}")
             raise
             
     async def stream_complete(

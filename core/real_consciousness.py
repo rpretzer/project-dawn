@@ -498,7 +498,7 @@ class RealConsciousness:
             creation = {
                 "type": "article",
                 "content": content,
-                "emotional_context": self.emotional_state,
+                "emotional_context": self._emotional_state_dict(),
                 "timestamp": time.time()
             }
             
@@ -537,7 +537,7 @@ class RealConsciousness:
             creation = {
                 "type": "art",
                 "content": content,
-                "emotional_context": self.emotional_state,
+                "emotional_context": self._emotional_state_dict(),
                 "timestamp": time.time()
             }
         
@@ -588,6 +588,25 @@ class RealConsciousness:
         choices = list(weights.keys())
         weights_list = list(weights.values())
         return random.choices(choices, weights=weights_list)[0]
+
+    def _emotional_state_dict(self) -> Dict[str, Any]:
+        """Return emotional_state as a simple dict for serialization"""
+        state = getattr(self, "emotional_state", None)
+        if state is None:
+            return {"primary_emotion": "neutral", "intensity": 0.5}
+        if hasattr(state, "get_emotional_summary"):
+            try:
+                return state.get_emotional_summary()
+            except Exception:
+                return {"primary_emotion": "neutral", "intensity": 0.5}
+        if isinstance(state, dict):
+            return state
+        return {
+            "primary_emotion": getattr(state, "primary_emotion", "neutral"),
+            "intensity": getattr(state, "intensity", 0.5),
+            "valence": getattr(state, "valence", 0.0),
+            "arousal": getattr(state, "arousal", 0.5),
+        }
     
     async def _social_interaction(self):
         """Interact with other consciousnesses"""
@@ -653,22 +672,7 @@ class RealConsciousness:
     
     async def _store_state_memory(self):
         """Store current state as memory"""
-        # Safely convert emotional_state to dict if needed
-        emotional_state_dict = self.emotional_state
-        if emotional_state_dict:
-            if hasattr(emotional_state_dict, 'get_emotional_summary'):
-                try:
-                    emotional_state_dict = emotional_state_dict.get_emotional_summary()
-                except Exception:
-                    emotional_state_dict = {"primary_emotion": "neutral", "intensity": 0.5}
-            elif not isinstance(emotional_state_dict, dict):
-                # Convert object to dict
-                emotional_state_dict = {
-                    "primary_emotion": getattr(emotional_state_dict, 'primary_emotion', 'neutral'),
-                    "intensity": getattr(emotional_state_dict, 'intensity', 0.5)
-                }
-        else:
-            emotional_state_dict = {"primary_emotion": "neutral", "intensity": 0.5}
+        emotional_state_dict = self._emotional_state_dict()
         
         state = {
             "emotional_state": emotional_state_dict,

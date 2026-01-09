@@ -964,7 +964,7 @@ class RealtimeChatServer:
 
     async def http_index(self, request: web.Request) -> web.Response:
         html = _INDEX_HTML
-        return web.Response(text=html, content_type="text/html; charset=utf-8")
+        return web.Response(text=html, content_type="text/html", charset="utf-8")
 
     async def http_health(self, request: web.Request) -> web.Response:
         return _json_response({"ok": True, "ts": time.time()})

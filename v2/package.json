@@ -1,0 +1,16 @@
+{
+  "name": "project-dawn",
+  "version": "0.1.0",
+  "description": "Project Dawn - Decentralized Multi-Agent Network",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "build:sidecar": "python scripts/build_python_sidecar.py",
+    "build:all": "npm run build:sidecar && npm run tauri:build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.5.0"
+  }
+}

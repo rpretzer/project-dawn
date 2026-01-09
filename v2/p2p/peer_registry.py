@@ -1,0 +1,197 @@
+"""
+Peer Registry
+
+Manages local registry of known peers.
+"""
+
+import logging
+import time
+from typing import Dict, List, Optional, Callable
+from .peer import Peer
+
+logger = logging.getLogger(__name__)
+
+
+class PeerRegistry:
+    """
+    Local peer registry
+    
+    Maintains a registry of known peers with health tracking.
+    """
+    
+    def __init__(self, peer_timeout: float = 300.0):
+        """
+        Initialize peer registry
+        
+        Args:
+            peer_timeout: Seconds before considering peer dead (default 5 minutes)
+        """
+        self.peers: Dict[str, Peer] = {}  # node_id -> Peer
+        self.peer_timeout = peer_timeout
+        self.on_peer_added: Optional[Callable[[Peer], None]] = None
+        self.on_peer_removed: Optional[Callable[[Peer], None]] = None
+        self.on_peer_updated: Optional[Callable[[Peer], None]] = None
+        
+        logger.debug("PeerRegistry initialized")
+    
+    def add_peer(self, peer: Peer) -> None:
+        """
+        Add or update peer in registry
+        
+        Args:
+            peer: Peer to add/update
+        """
+        is_new = peer.node_id not in self.peers
+        
+        if is_new:
+            self.peers[peer.node_id] = peer
+            logger.info(f"Added peer: {peer.node_id[:16]}... ({peer.address})")
+            if self.on_peer_added:
+                self.on_peer_added(peer)
+        else:
+            # Update existing peer
+            old_peer = self.peers[peer.node_id]
+            self.peers[peer.node_id] = peer
+            logger.debug(f"Updated peer: {peer.node_id[:16]}...")
+            if self.on_peer_updated:
+                self.on_peer_updated(peer)
+    
+    def remove_peer(self, node_id: str) -> Optional[Peer]:
+        """
+        Remove peer from registry
+        
+        Args:
+            node_id: Node ID of peer to remove
+            
+        Returns:
+            Removed peer or None if not found
+        """
+        if node_id in self.peers:
+            peer = self.peers.pop(node_id)
+            logger.info(f"Removed peer: {node_id[:16]}...")
+            if self.on_peer_removed:
+                self.on_peer_removed(peer)
+            return peer
+        return None
+    
+    def get_peer(self, node_id: str) -> Optional[Peer]:
+        """
+        Get peer by node ID
+        
+        Args:
+            node_id: Node ID
+            
+        Returns:
+            Peer or None if not found
+        """
+        return self.peers.get(node_id)
+    
+    def get_peer_by_address(self, address: str) -> Optional[Peer]:
+        """
+        Get peer by address
+        
+        Args:
+            address: Peer address
+            
+        Returns:
+            Peer or None if not found
+        """
+        for peer in self.peers.values():
+            if peer.address == address:
+                return peer
+        return None
+    
+    def list_peers(self, alive_only: bool = False) -> List[Peer]:
+        """
+        List all peers
+        
+        Args:
+            alive_only: Only return alive peers
+            
+        Returns:
+            List of peers
+        """
+        peers = list(self.peers.values())
+        
+        if alive_only:
+            peers = [p for p in peers if p.is_alive(self.peer_timeout)]
+        
+        return peers
+    
+    def list_connected_peers(self) -> List[Peer]:
+        """List all connected peers"""
+        return [p for p in self.peers.values() if p.connected]
+    
+    def list_alive_peers(self) -> List[Peer]:
+        """List all alive peers"""
+        return self.list_peers(alive_only=True)
+    
+    def cleanup_dead_peers(self) -> List[Peer]:
+        """
+        Remove dead peers from registry
+        
+        Returns:
+            List of removed peers
+        """
+        dead_peers = []
+        current_time = time.time()
+        
+        for node_id, peer in list(self.peers.items()):
+            if not peer.is_alive(self.peer_timeout):
+                dead_peers.append(self.remove_peer(node_id))
+                logger.debug(f"Removed dead peer: {node_id[:16]}... (last seen {current_time - peer.last_seen:.0f}s ago)")
+        
+        return dead_peers
+    
+    def update_peer_activity(self, node_id: str) -> bool:
+        """
+        Update peer's last seen timestamp
+        
+        Args:
+            node_id: Node ID
+            
+        Returns:
+            True if peer found and updated, False otherwise
+        """
+        peer = self.get_peer(node_id)
+        if peer:
+            peer.update_activity()
+            return True
+        return False
+    
+    def get_peer_count(self) -> int:
+        """Get total number of peers"""
+        return len(self.peers)
+    
+    def get_alive_peer_count(self) -> int:
+        """Get number of alive peers"""
+        return len(self.list_alive_peers())
+    
+    def get_connected_peer_count(self) -> int:
+        """Get number of connected peers"""
+        return len(self.list_connected_peers())
+    
+    def has_peer(self, node_id: str) -> bool:
+        """Check if peer exists in registry"""
+        return node_id in self.peers
+    
+    def clear(self) -> None:
+        """Clear all peers from registry"""
+        self.peers.clear()
+        logger.debug("Peer registry cleared")
+    
+    def get_peer_stats(self) -> Dict[str, Any]:
+        """Get registry statistics"""
+        alive = self.list_alive_peers()
+        connected = self.list_connected_peers()
+        
+        return {
+            "total_peers": len(self.peers),
+            "alive_peers": len(alive),
+            "connected_peers": len(connected),
+            "dead_peers": len(self.peers) - len(alive),
+            "average_health_score": sum(p.health_score for p in self.peers.values()) / len(self.peers) if self.peers else 0.0,
+        }
+
+
+

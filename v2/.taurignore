@@ -1,0 +1,53 @@
+# Tauri ignore file
+# Files and directories to exclude from Tauri bundle
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Tests
+tests/
+test_*.py
+*_test.py
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Scripts (not needed in bundle)
+scripts/
+
+# Data directories (runtime)
+data/
+logs/
+
+# Git
+.git/
+.gitignore
+
+# Rust
+src-tauri/target/
+Cargo.lock
+
+# Node
+node_modules/
+package-lock.json

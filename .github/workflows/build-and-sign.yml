@@ -1,0 +1,125 @@
+name: Build and Sign Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: true
+        type: string
+
+jobs:
+  build-and-sign:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          cd v2
+          pip install -r requirements.txt
+      
+      - name: Build Python sidecar (if Tauri enabled)
+        id: build_sidecar
+        run: |
+          cd v2
+          if [ -f "scripts/build_python_sidecar.py" ]; then
+            python scripts/build_python_sidecar.py || echo "Sidecar build skipped (optional)"
+          fi
+        continue-on-error: true
+      
+      - name: Set up GPG
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          if [ -n "$GPG_PRIVATE_KEY" ]; then
+            echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --sign-key $(gpg --list-secret-keys --keyid-format LONG | grep sec | awk '{print $2}' | cut -d'/' -f2) || true
+          else
+            echo "Warning: GPG_PRIVATE_KEY secret not set. Skipping signing."
+          fi
+      
+      - name: Generate checksums
+        run: |
+          cd v2
+          python scripts/generate_checksum.py dist/ CHECKSUM.txt || python scripts/generate_checksum.py . CHECKSUM.txt
+          cat CHECKSUM.txt
+      
+      - name: Sign checksum file
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          cd v2
+          if [ -f "CHECKSUM.txt" ] && [ -n "$GPG_PASSPHRASE" ]; then
+            echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --detach-sign --armor CHECKSUM.txt
+            ls -la CHECKSUM.txt*
+          else
+            echo "Warning: Cannot sign - CHECKSUM.txt missing or GPG_PASSPHRASE not set"
+          fi
+        continue-on-error: true
+      
+      - name: Verify signature
+        run: |
+          cd v2
+          if [ -f "CHECKSUM.txt.sig" ]; then
+            gpg --verify CHECKSUM.txt.sig CHECKSUM.txt || echo "Verification failed (expected if public key not imported)"
+          fi
+        continue-on-error: true
+      
+      - name: Export public key
+        id: export_pubkey
+        run: |
+          if gpg --list-secret-keys | grep -q sec; then
+            gpg --armor --export > public_key.asc
+            echo "Public key exported"
+          else
+            echo "No GPG keys found"
+          fi
+        continue-on-error: true
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: |
+            v2/CHECKSUM.txt
+            v2/CHECKSUM.txt.sig
+            v2/public_key.asc
+            v2/dist/**
+          retention-days: 90
+      
+      - name: Create release notes
+        run: |
+          echo "## Release Artifacts" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Checksums" >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+          cat v2/CHECKSUM.txt >> release_notes.md || echo "No checksums generated" >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Verification" >> release_notes.md
+          echo "To verify the release:" >> release_notes.md
+          echo "\`\`\`bash" >> release_notes.md
+          echo "# Import public key" >> release_notes.md
+          echo "gpg --import public_key.asc" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "# Verify signature" >> release_notes.md
+          echo "gpg --verify CHECKSUM.txt.sig CHECKSUM.txt" >> release_notes.md
+          echo "\`\`\`" >> release_notes.md
+      
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release_notes.md
