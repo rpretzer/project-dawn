@@ -163,6 +163,10 @@ class Libp2pTransport:
         
         # Active connections: peer_id -> stream
         self.peer_streams: Dict[str, INetStream] = {}
+
+        # Discovery handles (optional)
+        self._mdns_service = None
+        self._dht = None
         
         # State
         self.state = Libp2pTransportState.DISCONNECTED
@@ -253,23 +257,50 @@ class Libp2pTransport:
             async def handle_stream(stream: INetStream):
                 """Handle incoming stream"""
                 await self._handle_stream(stream)
-            
-            # Set handler (API may vary by py-libp2p version)
-            # For now, we'll handle streams in the connection loop
-            logger.debug("Stream handler set up")
+
+            if hasattr(self.host, "set_stream_handler"):
+                self.host.set_stream_handler(protocol_id, handle_stream)
+                logger.debug("Stream handler registered on host")
+            else:
+                network = self.host.get_network() if hasattr(self.host, "get_network") else None
+                if network and hasattr(network, "set_stream_handler"):
+                    network.set_stream_handler(protocol_id, handle_stream)
+                    logger.debug("Stream handler registered on network")
+                else:
+                    logger.warning("Stream handler registration not supported by libp2p host")
         
         except Exception as e:
             logger.warning(f"Failed to set up stream handler: {e}")
     
     async def _start_mdns_discovery(self) -> None:
         """Start mDNS discovery"""
-        # In real implementation, use libp2p's mDNS discovery
-        logger.info("mDNS discovery started (Libp2p)")
+        if not LIBP2P_AVAILABLE or self.host is None:
+            return
+        try:
+            from libp2p.discovery import mdns as libp2p_mdns
+            service_cls = getattr(libp2p_mdns, "MDNSService", None) or getattr(libp2p_mdns, "MDNSDiscovery", None)
+            if not service_cls:
+                logger.warning("Libp2p mDNS discovery not available in this version")
+                return
+            self._mdns_service = service_cls(self.host, "project-dawn")
+            if hasattr(self._mdns_service, "start"):
+                await self._mdns_service.start()
+            logger.info("mDNS discovery started (Libp2p)")
+        except Exception as e:
+            logger.warning(f"Failed to start mDNS discovery: {e}")
     
     async def _start_dht_discovery(self) -> None:
         """Start DHT discovery"""
-        # In real implementation, use libp2p's Kademlia DHT
-        logger.info("DHT discovery started (Libp2p)")
+        if not LIBP2P_AVAILABLE or self.host is None:
+            return
+        try:
+            from libp2p.kademlia.dht import DHT
+            self._dht = DHT(self.host)
+            if hasattr(self._dht, "start"):
+                await self._dht.start()
+            logger.info("DHT discovery started (Libp2p)")
+        except Exception as e:
+            logger.warning(f"Failed to start DHT discovery: {e}")
     
     async def _connect_bootstrap_peers(self) -> None:
         """Connect to bootstrap peers"""
@@ -318,6 +349,7 @@ class Libp2pTransport:
                 stream = await libp2p_open_stream(self.host, peer_id)
                 if stream:
                     self.peer_streams[peer_id] = stream
+                    asyncio.create_task(self._handle_stream(stream))
                 
                 if self.on_peer_connect:
                     await self.on_peer_connect(peer_id)
@@ -349,6 +381,7 @@ class Libp2pTransport:
                 stream = await libp2p_open_stream(self.host, peer_id)
                 if stream:
                     self.peer_streams[peer_id] = stream
+                    asyncio.create_task(self._handle_stream(stream))
                 else:
                     logger.warning(f"Failed to open stream to {peer_id[:16]}...")
                     return False

@@ -75,8 +75,8 @@ async def main():
         identity=identity,
         address="ws://localhost:8000",
         bootstrap_nodes=None,  # No bootstrap nodes for single-node setup
-        enable_encryption=False,  # Disabled for frontend compatibility
-        enable_privacy=False,  # Privacy features disabled by default (optional)
+        enable_encryption=True,
+        enable_privacy=True,
     )
     
     # Create and register first agent
@@ -121,4 +121,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         sys.exit(0)
-

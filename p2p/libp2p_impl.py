@@ -6,9 +6,9 @@ This module provides the concrete implementation for libp2p_transport.py
 """
 
 import asyncio
+import inspect
 import logging
 from typing import Optional, List, Dict, Any, Callable, Awaitable
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,26 @@ except ImportError as e:
     create_new_key_pair = None
 
 
+def _extract_peer_id_from_multiaddr(addr: Any) -> Optional[str]:
+    """Extract peer ID from a multiaddr if present."""
+    try:
+        if hasattr(addr, "value_for_protocol"):
+            peer_id = addr.value_for_protocol("p2p")
+            if peer_id:
+                return peer_id
+            return addr.value_for_protocol("ipfs")
+    except Exception:
+        return None
+    return None
+
+
+async def _maybe_await(value: Any) -> Any:
+    """Await value if it is awaitable."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
 async def create_libp2p_host(
     listen_addresses: List[str],
     key_pair: Optional[Any] = None,
@@ -135,39 +155,63 @@ async def create_libp2p_host(
         
         # Create host - try different methods based on API availability
         host = None
-        
-        if new_node:
-            # Use new_node helper if available
+        listen_multiaddrs = []
+        if Multiaddr != Any:
+            for addr_str in listen_addresses:
+                try:
+                    listen_multiaddrs.append(Multiaddr(addr_str))
+                except Exception as e:
+                    logger.warning(f"Invalid listen address {addr_str}: {e}")
+        else:
+            logger.warning("Multiaddr not available; listen addresses may be ignored")
+
+        new_node_func = new_node
+        if new_node_func is None:
             try:
-                host = await new_node(
-                    key_pair=key_pair,
-                    transport_opt=["/ip4/0.0.0.0/tcp/0"],
-                )
+                import libp2p
+                new_node_func = getattr(libp2p, "new_node", None) or getattr(libp2p, "new_host", None)
+            except Exception:
+                new_node_func = None
+
+        if new_node_func:
+            try:
+                params = {}
+                try:
+                    param_names = set(inspect.signature(new_node_func).parameters.keys())
+                except Exception:
+                    param_names = set()
+
+                if "key_pair" in param_names:
+                    params["key_pair"] = key_pair
+                elif "private_key" in param_names:
+                    params["private_key"] = key_pair
+
+                if listen_multiaddrs:
+                    if "listen_addrs" in param_names:
+                        params["listen_addrs"] = listen_multiaddrs
+                    elif "listen_addresses" in param_names:
+                        params["listen_addresses"] = listen_multiaddrs
+                    elif "transport_opt" in param_names:
+                        params["transport_opt"] = listen_multiaddrs
+
+                host = await _maybe_await(new_node_func(**params))
             except Exception as e:
-                logger.warning(f"new_node failed: {e}, trying alternative method")
-        
+                logger.warning(f"new_node/new_host failed: {e}")
+
         if host is None:
-            # Alternative: manual host creation
-            # This would require more detailed setup based on py-libp2p version
-            logger.warning("new_node not available, manual host creation needed")
-            # For now, return None - implementation would need py-libp2p version-specific code
+            logger.error("Libp2p host creation failed (no compatible constructor available)")
             return None
-        
-        # Start listening on specified addresses
-        for addr_str in listen_addresses:
-            try:
-                if Multiaddr != Any:
-                    addr = Multiaddr(addr_str)
-                    network = host.get_network() if hasattr(host, 'get_network') else None
-                    if network:
+
+        # Start listening on specified addresses if host did not already
+        if listen_multiaddrs:
+            network = host.get_network() if hasattr(host, "get_network") else None
+            if network and hasattr(network, "listen"):
+                for addr in listen_multiaddrs:
+                    try:
                         await network.listen(addr)
-                        logger.info(f"Libp2p host listening on {addr_str}")
-                    else:
-                        logger.warning(f"Host network not available for {addr_str}")
-                else:
-                    logger.warning(f"Multiaddr not available, cannot listen on {addr_str}")
-            except Exception as e:
-                logger.warning(f"Failed to listen on {addr_str}: {e}")
+                        logger.info(f"Libp2p host listening on {addr}")
+                    except Exception as e:
+                        logger.warning(f"Failed to listen on {addr}: {e}")
         
         return host
     
@@ -190,14 +234,33 @@ def convert_node_identity_to_key_pair(identity: Any) -> Optional[Any]:
         return None
     
     try:
-        # Get the Ed25519 private key from identity
-        # Note: This is a simplified conversion
-        # Actual implementation would need to properly convert key formats
-        
-        # For now, generate a new key pair
-        # In production, you'd want to derive from existing identity keys
-        key_pair = create_new_key_pair()
-        
+        private_bytes = None
+        if hasattr(identity, "serialize_private_key") and (not hasattr(identity, "can_sign") or identity.can_sign()):
+            private_bytes = identity.serialize_private_key()
+        key_pair = None
+
+        # Prefer Ed25519 when available
+        try:
+            from libp2p.crypto import ed25519 as lp_ed25519
+            if private_bytes and hasattr(lp_ed25519, "Ed25519PrivateKey"):
+                key_cls = lp_ed25519.Ed25519PrivateKey
+                if hasattr(key_cls, "from_bytes"):
+                    key_pair = key_cls.from_bytes(private_bytes)
+                elif hasattr(key_cls, "from_raw"):
+                    key_pair = key_cls.from_raw(private_bytes)
+            if key_pair is None and hasattr(lp_ed25519, "create_new_key_pair"):
+                key_pair = lp_ed25519.create_new_key_pair()
+        except Exception:
+            key_pair = None
+
+        # Fallback to generic key generation if available
+        if key_pair is None and create_new_key_pair:
+            key_pair = create_new_key_pair()
+
+        if key_pair is None:
+            logger.warning("Failed to derive Libp2p key pair from identity")
+            return None
+
         logger.debug("Converted node identity to Libp2p key pair")
         return key_pair
     
@@ -226,15 +289,29 @@ async def connect_to_peer(
         return False
     
     try:
+        if Multiaddr == Any:
+            logger.error("Multiaddr not available, cannot connect to peer")
+            return False
+
         addr = Multiaddr(peer_address)
-        
-        if peer_id:
-            peer_id_obj = PeerID.from_base58(peer_id)
+        if not peer_id:
+            peer_id = _extract_peer_id_from_multiaddr(addr)
+
+        if not peer_id:
+            logger.error("Peer ID missing from multiaddr; include /p2p/<peer_id> in address")
+            return False
+
+        peer_id_obj = PeerID.from_base58(peer_id) if hasattr(PeerID, "from_base58") else PeerID(peer_id)
+
+        try:
             peer_info = PeerInfo(peer_id_obj, [addr])
-        else:
-            # Try to connect and discover peer ID
-            peer_info = PeerInfo(PeerID.from_base58(""), [addr])
-        
+        except Exception:
+            try:
+                peer_info = PeerInfo(peer_id=peer_id_obj, addrs=[addr])
+            except Exception as e:
+                logger.error(f"Failed to construct PeerInfo: {e}")
+                return False
+
         await host.connect(peer_info)
         logger.info(f"Connected to peer: {peer_address}")
         return True
@@ -264,7 +341,7 @@ async def open_stream(
         return None
     
     try:
-        peer_id_obj = PeerID.from_base58(peer_id)
+        peer_id_obj = PeerID.from_base58(peer_id) if hasattr(PeerID, "from_base58") else PeerID(peer_id)
         stream = await host.new_stream(peer_id_obj, [protocol_id])
         logger.debug(f"Opened stream to peer: {peer_id[:16]}...")
         return stream
@@ -290,7 +367,10 @@ async def read_stream_message(stream: INetStream, timeout: float = 5.0) -> Optio
     
     try:
         # Read message with timeout
-        message = await asyncio.wait_for(stream.read(), timeout=timeout)
+        try:
+            message = await asyncio.wait_for(stream.read(), timeout=timeout)
+        except TypeError:
+            message = await asyncio.wait_for(stream.read(1024 * 1024), timeout=timeout)
         return message
     
     except asyncio.TimeoutError:
@@ -316,7 +396,9 @@ async def write_stream_message(stream: INetStream, message: bytes) -> bool:
         return False
     
     try:
-        await stream.write(message)
+        result = stream.write(message)
+        if inspect.isawaitable(result):
+            await result
         return True
     
     except Exception as e:

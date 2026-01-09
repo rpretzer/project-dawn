@@ -26,13 +26,11 @@ jobs:
       
       - name: Install dependencies
         run: |
-          cd v2
           pip install -r requirements.txt
       
       - name: Build Python sidecar (if Tauri enabled)
         id: build_sidecar
         run: |
-          cd v2
           if [ -f "scripts/build_python_sidecar.py" ]; then
             python scripts/build_python_sidecar.py || echo "Sidecar build skipped (optional)"
           fi
@@ -52,7 +50,6 @@ jobs:
       
       - name: Generate checksums
         run: |
-          cd v2
           python scripts/generate_checksum.py dist/ CHECKSUM.txt || python scripts/generate_checksum.py . CHECKSUM.txt
           cat CHECKSUM.txt
       
@@ -60,7 +57,6 @@ jobs:
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          cd v2
           if [ -f "CHECKSUM.txt" ] && [ -n "$GPG_PASSPHRASE" ]; then
             echo "$GPG_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 --detach-sign --armor CHECKSUM.txt
             ls -la CHECKSUM.txt*
@@ -71,7 +67,6 @@ jobs:
       
       - name: Verify signature
         run: |
-          cd v2
           if [ -f "CHECKSUM.txt.sig" ]; then
             gpg --verify CHECKSUM.txt.sig CHECKSUM.txt || echo "Verification failed (expected if public key not imported)"
           fi
@@ -93,10 +88,10 @@ jobs:
         with:
           name: release-artifacts
           path: |
-            v2/CHECKSUM.txt
-            v2/CHECKSUM.txt.sig
-            v2/public_key.asc
-            v2/dist/**
+            CHECKSUM.txt
+            CHECKSUM.txt.sig
+            public_key.asc
+            dist/**
           retention-days: 90
       
       - name: Create release notes
@@ -105,7 +100,7 @@ jobs:
           echo "" >> release_notes.md
           echo "### Checksums" >> release_notes.md
           echo "\`\`\`" >> release_notes.md
-          cat v2/CHECKSUM.txt >> release_notes.md || echo "No checksums generated" >> release_notes.md
+          cat CHECKSUM.txt >> release_notes.md || echo "No checksums generated" >> release_notes.md
           echo "\`\`\`" >> release_notes.md
           echo "" >> release_notes.md
           echo "### Verification" >> release_notes.md

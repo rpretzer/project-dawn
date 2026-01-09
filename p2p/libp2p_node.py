@@ -8,12 +8,11 @@ Provides automatic peer discovery, NAT traversal, and multi-transport support.
 import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional, List, Callable, Awaitable
+from typing import Any, Dict, Optional, List
 from uuid import uuid4
 
 from crypto import NodeIdentity
 from mcp.server import MCPServer
-from mcp.protocol import JSONRPCRequest, JSONRPCResponse
 from .libp2p_transport import Libp2pTransport, Libp2pTransportAdapter
 from .peer import Peer
 from .peer_registry import PeerRegistry
@@ -50,6 +49,7 @@ class Libp2pP2PNode:
         """
         self.identity = identity
         self.node_id = identity.get_node_id()
+        self.peer_id: Optional[str] = None
         
         # Default listen addresses
         if listen_addresses is None:
@@ -93,6 +93,11 @@ class Libp2pP2PNode:
         
         # Start Libp2p transport
         await self.transport.start()
+
+        # Align node_id with Libp2p peer_id for routing
+        self.peer_id = self.transport.get_peer_id()
+        if self.peer_id and self.peer_id != self.node_id:
+            self._sync_node_id(self.peer_id)
         
         # Announce agents in DHT
         await self._announce_agents()
@@ -119,9 +124,23 @@ class Libp2pP2PNode:
             agent_instance: Optional agent instance (for coordination agent)
         """
         self.agents[agent_id] = server
-        logger.info(f"Registered agent: {agent_id} with {len(server.get_tools())} tools")
-        
-        # Announce in distributed registry
+
+        tools = server.tool_registry.list_tools()
+        resources = server.resource_registry.list_resources()
+        prompts = server.prompt_registry.list_prompts()
+
+        self.agent_registry.register_local_agent(
+            agent_id=agent_id,
+            name=server.name,
+            description=f"MCP agent: {server.name}",
+            tools=tools,
+            resources=resources,
+            prompts=prompts,
+        )
+
+        logger.info(f"Registered agent: {agent_id} with {len(tools)} tools")
+
+        # Announce in distributed registry / DHT
         asyncio.create_task(self._announce_agent(agent_id, server))
     
     async def _announce_agent(self, agent_id: str, server: MCPServer) -> None:
@@ -129,19 +148,40 @@ class Libp2pP2PNode:
         agent_info = {
             "node_id": self.node_id,
             "agent_id": agent_id,
-            "tools": server.get_tools(),
-            "resources": server.get_resources(),
-            "prompts": server.get_prompts(),
+            "tools": server.tool_registry.list_tools(),
+            "resources": server.resource_registry.list_resources(),
+            "prompts": server.prompt_registry.list_prompts(),
         }
         
         agent_key = f"{self.node_id}:{agent_id}"
-        # In real implementation: await self.transport.announce_in_dht(f"agent:{agent_key}", agent_info)
+        # Optional: announce via libp2p DHT when discovery is available.
         logger.debug(f"Announced agent in DHT: {agent_key}")
     
     async def _announce_agents(self) -> None:
         """Announce all agents in DHT"""
         for agent_id, server in self.agents.items():
             await self._announce_agent(agent_id, server)
+
+    def _sync_node_id(self, new_node_id: str) -> None:
+        """Update node_id to match Libp2p peer ID and refresh registries."""
+        old_node_id = self.node_id
+        self.node_id = new_node_id
+        self.agent_registry = DistributedAgentRegistry(self.node_id)
+
+        for agent_id, server in self.agents.items():
+            tools = server.tool_registry.list_tools()
+            resources = server.resource_registry.list_resources()
+            prompts = server.prompt_registry.list_prompts()
+            self.agent_registry.register_local_agent(
+                agent_id=agent_id,
+                name=server.name,
+                description=f"MCP agent: {server.name}",
+                tools=tools,
+                resources=resources,
+                prompts=prompts,
+            )
+
+        logger.info(f"Updated node_id from {old_node_id[:16]}... to {new_node_id[:16]}...")
     
     async def _handle_message(self, peer_id: str, message: str) -> Optional[str]:
         """
@@ -156,97 +196,196 @@ class Libp2pP2PNode:
         """
         try:
             data = json.loads(message)
-            
-            # Handle JSON-RPC request
-            if "method" in data:
-                request = JSONRPCRequest.from_dict(data)
-                response = await self._handle_request(request, peer_id)
-                return json.dumps(response.to_dict()) if response else None
-            
-            # Handle JSON-RPC response
-            elif "id" in data and "result" in data:
-                response = JSONRPCResponse.from_dict(data)
-                request_id = response.id
-                if request_id in self.pending_requests:
-                    future = self.pending_requests.pop(request_id)
-                    future.set_result(response)
+
+            if "id" in data and ("result" in data or "error" in data):
+                request_id = str(data.get("id"))
+                future = self.pending_requests.pop(request_id, None)
+                if future and not future.done():
+                    future.set_result(data)
                 return None
-            
-            # Handle other message types
-            else:
+
+            if "method" not in data:
                 logger.warning(f"Unknown message type from {peer_id[:16]}...")
                 return None
-        
+
+            response = await self._route_message(data, peer_id)
+            if response is None:
+                return None
+            return json.dumps(response)
+
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse message from {peer_id[:16]}...: {e}")
             return None
         except Exception as e:
             logger.error(f"Error handling message from {peer_id[:16]}...: {e}", exc_info=True)
             return None
-    
-    async def _handle_request(self, request: JSONRPCRequest, peer_id: str) -> Optional[JSONRPCResponse]:
-        """Handle JSON-RPC request"""
-        # Route to appropriate agent
-        method_parts = request.method.split(".")
-        if len(method_parts) >= 2:
-            node_id, agent_id = method_parts[0], method_parts[1]
-            
-            # Check if it's a local agent
-            if node_id == self.node_id and agent_id in self.agents:
-                server = self.agents[agent_id]
-                # Handle request via MCP server
-                # In real implementation: result = await server.handle_request(request)
-                # For now, return placeholder
-                return JSONRPCResponse(
-                    id=request.id,
-                    result={"status": "handled"},
-                )
-            
-            # Route to remote agent
-            else:
-                return await self._route_to_remote_agent(node_id, agent_id, request)
-        
-        # Unknown method
-        return JSONRPCResponse(
-            id=request.id,
-            error={"code": -32601, "message": "Method not found"},
-        )
-    
-    async def _route_to_remote_agent(self, node_id: str, agent_id: str, request: JSONRPCRequest) -> Optional[JSONRPCResponse]:
-        """Route request to remote agent"""
-        # Find peer
-        peer = self.peer_registry.get_peer_by_node_id(node_id)
-        if not peer:
-            return JSONRPCResponse(
-                id=request.id,
-                error={"code": -32000, "message": f"Peer {node_id[:16]}... not found"},
-            )
-        
-        # Forward request
+
+    async def _route_message(self, message: Dict[str, Any], sender_peer_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Route a JSON-RPC message to the appropriate handler."""
+        method = message.get("method", "")
+
+        if method.startswith("node/"):
+            return await self._handle_node_method(method, message.get("params", {}))
+
+        if ":" in method and "/" in method:
+            target, agent_method = method.split("/", 1)
+            target_node_id, agent_id = target.split(":", 1)
+            if target_node_id == self.node_id:
+                return await self._route_to_local_agent(agent_id, agent_method, message.get("params", {}))
+            return await self._route_to_remote_agent(target_node_id, agent_id, agent_method, message)
+
+        if "/" in method:
+            agent_id, agent_method = method.split("/", 1)
+            return await self._route_to_local_agent(agent_id, agent_method, message.get("params", {}))
+
+        return await self._route_to_local_agent(None, method, message.get("params", {}))
+
+    async def _handle_node_method(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle node-level methods."""
+        if method == "node/list_agents":
+            agents = self.agent_registry.list_agents()
+            return {
+                "jsonrpc": "2.0",
+                "result": {"agents": [agent.to_dict() for agent in agents]},
+            }
+
+        if method == "node/list_peers":
+            peers = self.peer_registry.list_peers()
+            return {
+                "jsonrpc": "2.0",
+                "result": {"peers": [peer.to_dict() for peer in peers]},
+            }
+
+        if method == "node/get_info":
+            return {
+                "jsonrpc": "2.0",
+                "result": {
+                    "node_id": self.node_id,
+                    "peer_id": self.transport.get_peer_id(),
+                    "agents": list(self.agents.keys()),
+                    "peer_count": self.peer_registry.get_peer_count(),
+                },
+            }
+
+        return {
+            "jsonrpc": "2.0",
+            "error": {"code": -32601, "message": "Method not found"},
+        }
+
+    async def _route_to_local_agent(self, agent_id: Optional[str], method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Route a message to a local agent."""
+        if agent_id is None:
+            if not self.agents:
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32601, "message": "No agents available"},
+                }
+            agent_id = list(self.agents.keys())[0]
+
+        agent = self.agents.get(agent_id)
+        if not agent:
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32601, "message": f"Agent not found: {agent_id}"},
+            }
+
+        request_id = str(uuid4())
+        request_json = json.dumps({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params or {},
+            "id": request_id,
+        })
+
         try:
-            # In real implementation, we'd use the transport to send to the peer
-            # For now, placeholder
-            logger.debug(f"Routing request to remote agent {node_id}:{agent_id}")
-            return None
-        
+            response_json = await agent.handle_message(request_json)
+            if response_json:
+                return json.loads(response_json)
+            return {"jsonrpc": "2.0", "id": request_id, "result": None}
         except Exception as e:
+            logger.error(f"Error routing to agent {agent_id}: {e}", exc_info=True)
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32603, "message": str(e)},
+            }
+
+    async def _route_to_remote_agent(
+        self,
+        target_node_id: str,
+        agent_id: str,
+        method: str,
+        original_message: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Route message to remote agent via Libp2p."""
+        peer = self.peer_registry.get_peer(target_node_id)
+        if not peer:
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32601, "message": f"Peer not found: {target_node_id[:16]}..."},
+            }
+
+        peer_id = peer.peer_id or peer.node_id
+        if peer_id not in self.transport.get_connected_peers():
+            connected = await self.transport.connect_to_peer(peer_id, peer.address)
+            if not connected:
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": f"Failed to connect to peer: {target_node_id[:16]}..."},
+                }
+
+        message = original_message.copy()
+        message["method"] = f"{target_node_id}:{agent_id}/{method}"
+        request_id = str(message.get("id") or uuid4())
+        message["id"] = request_id
+
+        future = asyncio.Future()
+        self.pending_requests[request_id] = future
+
+        try:
+            await self.transport.send_to_peer(peer_id, json.dumps(message))
+            return await asyncio.wait_for(future, timeout=30.0)
+        except asyncio.TimeoutError:
+            self.pending_requests.pop(request_id, None)
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32000, "message": "Remote request timed out"},
+            }
+        except Exception as e:
+            self.pending_requests.pop(request_id, None)
             logger.error(f"Error routing to remote agent: {e}")
-            return JSONRPCResponse(
-                id=request.id,
-                error={"code": -32000, "message": str(e)},
-            )
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32000, "message": str(e)},
+            }
     
     async def _on_peer_connect(self, peer_id: str) -> None:
         """Handle peer connection"""
         logger.info(f"Peer connected: {peer_id[:16]}...")
-        # Add to peer registry
-        # In real implementation, get peer info and add to registry
+        peer = self.peer_registry.get_peer(peer_id)
+        if peer is None:
+            peer = Peer(node_id=peer_id, address=peer_id, peer_id=peer_id, connected=True)
+            self.peer_registry.add_peer(peer)
+        else:
+            peer.connected = True
+            self.peer_registry.update_peer_activity(peer_id)
     
     async def _on_peer_disconnect(self, peer_id: str) -> None:
         """Handle peer disconnection"""
         logger.info(f"Peer disconnected: {peer_id[:16]}...")
-        # Update peer registry
-        # In real implementation, mark peer as disconnected
+        peer = self.peer_registry.get_peer(peer_id)
+        if peer:
+            peer.connected = False
+            self.peer_registry.update_peer_activity(peer_id)
+
+    def add_peer(self, node_id: str, address: str, peer_id: Optional[str] = None) -> None:
+        """Add a peer to the registry."""
+        peer = Peer(
+            node_id=node_id,
+            address=address,
+            peer_id=peer_id or node_id,
+            connected=False,
+        )
+        self.peer_registry.add_peer(peer)
     
     async def call_agent_tool(
         self,
@@ -270,38 +409,39 @@ class Libp2pP2PNode:
             Tool result
         """
         request_id = str(uuid4())
-        method = f"{target_node_id}.{target_agent_id}.{tool_name}"
-        
-        request = JSONRPCRequest(
-            id=request_id,
-            method=method,
-            params=arguments or {},
-        )
-        
-        # Create future for response
+        message = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": f"{target_node_id}:{target_agent_id}/tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments or {},
+            },
+        }
+
         future = asyncio.Future()
         self.pending_requests[request_id] = future
-        
+
+        peer = self.peer_registry.get_peer(target_node_id)
+        if not peer:
+            self.pending_requests.pop(request_id, None)
+            raise ValueError(f"Peer {target_node_id[:16]}... not found")
+
+        peer_id = peer.peer_id or peer.node_id
+        if peer_id not in self.transport.get_connected_peers():
+            connected = await self.transport.connect_to_peer(peer_id, peer.address)
+            if not connected:
+                self.pending_requests.pop(request_id, None)
+                raise ConnectionError(f"Failed to connect to peer {target_node_id[:16]}...")
+
         try:
-            # Send request
-            message = json.dumps(request.to_dict())
-            
-            # Find peer and send
-            peer = self.peer_registry.get_peer_by_node_id(target_node_id)
-            if not peer:
-                raise ValueError(f"Peer {target_node_id[:16]}... not found")
-            
-            # In real implementation: await self.transport.send_to_peer(peer.peer_id, message)
-            # For now, placeholder
-            
-            # Wait for response
+            await self.transport.send_to_peer(peer_id, json.dumps(message))
             response = await asyncio.wait_for(future, timeout=timeout)
-            return response.result
-        
+            return response.get("result")
         except asyncio.TimeoutError:
             self.pending_requests.pop(request_id, None)
             raise TimeoutError(f"Request to {target_node_id}:{target_agent_id}.{tool_name} timed out")
-        except Exception as e:
+        except Exception:
             self.pending_requests.pop(request_id, None)
             raise
     

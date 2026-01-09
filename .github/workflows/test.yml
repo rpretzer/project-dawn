@@ -25,17 +25,14 @@ jobs:
       
       - name: Install dependencies
         run: |
-          cd v2
           pip install -r requirements.txt
           pip install pytest pytest-asyncio
       
       - name: Run tests
         run: |
-          cd v2
           python test_first_agent.py
           pytest tests/ -v
       
       - name: Check imports
         run: |
-          cd v2
           python -c "from p2p import P2PNode; from agents import FirstAgent; print('✓ Imports work')"

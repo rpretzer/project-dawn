@@ -117,7 +117,7 @@ echo ""
 echo "Verifying installation..."
 python3 -c "
 import sys
-sys.path.insert(0, 'v2' if os.path.exists('v2') else '.')
+sys.path.insert(0, '.')
 try:
     from p2p.libp2p_impl import PY_LIBP2P_AVAILABLE
     if PY_LIBP2P_AVAILABLE:
@@ -134,4 +134,4 @@ echo "Installation complete!"
 echo ""
 echo "To use Libp2p:"
 echo "  export LIBP2P_ENABLED=true"
-echo "  python v2/server_p2p.py  # or use Libp2pP2PNode in code"
+echo "  python server_p2p.py  # or use Libp2pP2PNode in code"

@@ -21,7 +21,8 @@ class Peer:
     Contains information about a peer in the network.
     """
     node_id: str
-    address: str  # WebSocket address (e.g., "ws://192.168.1.100:8000")
+    address: str  # Peer address (WebSocket URL or Libp2p multiaddr)
+    peer_id: Optional[str] = None  # Libp2p peer ID (optional)
     public_key: Optional[bytes] = None  # Ed25519 public key
     identity: Optional[NodeIdentity] = None  # Full identity (if available)
     
@@ -89,6 +90,7 @@ class Peer:
         return {
             "node_id": self.node_id,
             "address": self.address,
+            "peer_id": self.peer_id,
             "public_key": self.public_key.hex() if self.public_key else None,
             "connected": self.connected,
             "last_seen": self.last_seen,
@@ -110,6 +112,7 @@ class Peer:
         peer = cls(
             node_id=data["node_id"],
             address=data["address"],
+            peer_id=data.get("peer_id"),
             public_key=bytes.fromhex(data["public_key"]) if data.get("public_key") else None,
             connected=data.get("connected", False),
             last_seen=data.get("last_seen", time.time()),
@@ -130,6 +133,5 @@ class Peer:
         status = "connected" if self.connected else "disconnected"
         agents_str = f", {len(self.agents)} agents" if self.agents else ""
         return f"Peer(node_id={self.node_id[:16]}..., address={self.address}, {status}{agents_str})"
-
 
 
