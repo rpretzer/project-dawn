@@ -1,0 +1,9 @@
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib64
+includedir=${prefix}/include
+
+Name: javascriptcoregtk-4.0
+Description: Compatibility shim for javascriptcoregtk-4.1
+Version: 4.1
+Requires: javascriptcoregtk-4.1

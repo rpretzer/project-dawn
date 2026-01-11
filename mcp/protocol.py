@@ -6,6 +6,7 @@ Specification: https://www.jsonrpc.org/specification
 """
 
 import asyncio
+import inspect
 import json
 import uuid
 import logging
@@ -26,17 +27,20 @@ class JSONRPCErrorCode(IntEnum):
     # Server error codes -32000 to -32099 are reserved
 
 
+_UNSET = object()
+
+
 @dataclass
 class JSONRPCRequest:
     """JSON-RPC 2.0 Request"""
     method: str
     params: Optional[Union[Dict[str, Any], List[Any]]] = None
-    id: Optional[Union[str, int]] = None
+    id: Optional[Union[str, int]] = field(default=_UNSET)
     jsonrpc: str = "2.0"
     
     def __post_init__(self):
         """Generate ID if not provided"""
-        if self.id is None:
+        if self.id is _UNSET:
             self.id = str(uuid.uuid4())
     
     def to_dict(self) -> Dict[str, Any]:
@@ -44,8 +48,9 @@ class JSONRPCRequest:
         result = {
             "jsonrpc": self.jsonrpc,
             "method": self.method,
-            "id": self.id,
         }
+        if self.id is not None:
+            result["id"] = self.id
         if self.params is not None:
             result["params"] = self.params
         return result
@@ -63,7 +68,7 @@ class JSONRPCRequest:
         return cls(
             method=data["method"],
             params=data.get("params"),
-            id=data.get("id"),
+            id=data["id"] if "id" in data else _UNSET,
             jsonrpc=data.get("jsonrpc", "2.0"),
         )
     
@@ -227,7 +232,7 @@ class JSONRPCHandler:
     
     def _is_async(self, handler: Callable) -> bool:
         """Check if handler is async"""
-        return asyncio.iscoroutinefunction(handler)
+        return inspect.iscoroutinefunction(handler)
     
     def unregister_method(self, method: str):
         """Unregister a method handler"""
@@ -467,4 +472,3 @@ class JSONRPCHandler:
         
         request = JSONRPCRequest.from_dict(data)
         return self._handle_request(request)
-

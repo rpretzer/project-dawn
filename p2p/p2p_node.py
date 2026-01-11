@@ -8,6 +8,7 @@ Manages local agents and routes messages to/from peers.
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, Optional, List, Callable, Awaitable
 from uuid import uuid4
 
@@ -20,6 +21,8 @@ from .peer_registry import PeerRegistry
 from .discovery import PeerDiscovery
 from .privacy import PrivacyLayer
 from consensus import DistributedAgentRegistry
+from llm.config import LLMConfig, load_config, save_config
+from llm.ollama import list_models_async, chat_async
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +134,8 @@ class P2PNode:
         await self.discovery.discover_bootstrap()
         self.discovery.start_mdns()
         
-        # Register with mDNS
-        self.discovery.register_mdns_service(self.node_id, self.address, port)
+        # Register with mDNS (avoid blocking the event loop)
+        await asyncio.to_thread(self.discovery.register_mdns_service, self.node_id, self.address, port)
         
         # Start gossip discovery
         self.discovery.start_gossip(self._broadcast_gossip_announcement)
@@ -415,6 +418,24 @@ class P2PNode:
     
     async def _handle_node_method(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Handle node-level methods"""
+        if method == "llm_get_config":
+            config = load_config()
+            return {"jsonrpc": "2.0", "result": config.to_dict()}
+
+        if method == "llm_set_config":
+            config = load_config()
+            config.provider = params.get("provider", config.provider)
+            config.endpoint = params.get("endpoint", config.endpoint)
+            config.model = params.get("model", config.model)
+            config.system_prompt = params.get("system_prompt", config.system_prompt)
+            save_config(config)
+            return {"jsonrpc": "2.0", "result": config.to_dict()}
+
+        if method == "llm_list_models":
+            config = load_config()
+            endpoint = params.get("endpoint", config.endpoint)
+            models = await list_models_async(endpoint)
+            return {"jsonrpc": "2.0", "result": {"models": models}}
         # Handle DHT methods
         if method == "dht_find_node":
             dht = self.discovery.get_dht()
@@ -625,9 +646,21 @@ class P2PNode:
             if agent_id not in room["participants"]:
                 self.coordination_agent.add_participant(room_id, agent_id)
         
-        # Simple echo response for now (can be enhanced with LLM)
-        # In production, this would route to agent's LLM or reasoning system
-        response_text = f"I received your message: {message}. This is a simple echo response."
+        response_text = ""
+        config = load_config()
+        if config.provider == "ollama" and config.model:
+            try:
+                response_text = await chat_async(
+                    config.endpoint,
+                    config.model,
+                    [{"role": "user", "content": message}],
+                    system_prompt=config.system_prompt,
+                )
+            except Exception as exc:
+                logger.error(f"Ollama chat failed: {exc}", exc_info=True)
+                response_text = "I couldn't reach the LLM backend. Please check the Ollama config."
+        else:
+            response_text = "I received your message, but no LLM is configured yet. Set a model in the LLM picker."
         
         logger.info(f"Agent {agent_id} received chat message in room {room_id}")
         
@@ -917,4 +950,3 @@ class P2PNode:
             }
         
         return response
-

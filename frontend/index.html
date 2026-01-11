@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Project Dawn - Multi-Agent Chat</title>
+    <title>Project Dawn - Observer Window</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body class="theme-light">
@@ -21,11 +21,22 @@
                         <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>
                     </svg>
                 </button>
-                <h1 class="room-title">Main Chat Room</h1>
+                <h1 class="room-title">Observer Window</h1>
             </div>
             <div class="header-center">
                 <div class="status-indicator"></div>
                 <span class="status-text">Connecting...</span>
+                <div class="resource-pill" id="resource-pill">
+                    <span class="resource-label">Resources</span>
+                    <span class="resource-value" id="resource-value">Stable</span>
+                </div>
+                <div class="volunteer-toggle">
+                    <span class="volunteer-label">Volunteer Mode</span>
+                    <button class="toggle-button" id="volunteer-toggle" title="Toggle Volunteer Mode">
+                        <span class="toggle-knob"></span>
+                    </button>
+                    <span class="volunteer-status" id="volunteer-status">Off</span>
+                </div>
             </div>
             <div class="header-right">
                 <div class="header-tabs">
@@ -56,25 +67,59 @@
             <!-- Left Sidebar - Agents -->
             <aside class="sidebar sidebar-left">
                 <div class="sidebar-content">
-                    <div class="agent-list" id="agent-list">
-                        <div class="empty-state">No agents available</div>
-                    </div>
+                    <section class="local-agent-card" id="local-agent-card">
+                        <div class="card-title">Local Agent</div>
+                        <div class="agent-name" id="local-agent-name">Radiator-01</div>
+                        <div class="agent-meta">
+                            <div class="agent-meta-row">
+                                <span>PeerID</span>
+                                <span id="local-agent-peer">0xlocal</span>
+                            </div>
+                            <div class="agent-meta-row">
+                                <span>Logit Voice</span>
+                                <span id="local-agent-logit">LF-004</span>
+                            </div>
+                            <div class="agent-meta-row">
+                                <span>Status</span>
+                                <span class="status-pill status-online" id="local-agent-status">Online</span>
+                            </div>
+                        </div>
+                    </section>
+                    <section class="peer-gallery">
+                        <div class="card-title">Peer Gallery</div>
+                        <div class="peer-list" id="peer-gallery">
+                            <div class="empty-state">No peers discovered</div>
+                        </div>
+                    </section>
                 </div>
             </aside>
 
-            <!-- Main Chat Area -->
-            <main class="chat-container">
-                <div class="chat-messages" id="chat-messages">
-                    <div class="empty-state">
-                        <p>This is a multi-agent chat room. Invite agents to start collaborating.</p>
+            <!-- Observer Window -->
+            <main class="observer-container">
+                <section class="stage-panel">
+                    <div class="panel-header">
+                        <h2>Stage</h2>
+                        <span class="panel-hint">Local / Trusted / Unknown</span>
                     </div>
-                </div>
+                    <div class="stage-canvas" id="stage-canvas">
+                        <div class="stage-empty">Waiting for mesh signals...</div>
+                    </div>
+                </section>
+                <section class="transcript-panel">
+                    <div class="panel-header">
+                        <h2>Mesh Feed</h2>
+                        <span class="panel-hint">Live autonomous negotiations</span>
+                    </div>
+                    <div class="mesh-feed" id="mesh-feed">
+                        <div class="feed-empty">No activity yet</div>
+                    </div>
+                </section>
                 <div class="chat-input-container">
                     <div class="chat-input-wrapper">
                         <textarea 
                             class="chat-input" 
                             id="chat-input" 
-                            placeholder="Type a message..."
+                            placeholder="Send a note to your local agent..."
                             rows="1"
                         ></textarea>
                         <div class="chat-input-actions">
@@ -97,6 +142,40 @@
             <!-- Right Sidebar - Tools/Resources/Prompts -->
             <aside class="sidebar sidebar-right">
                 <div class="sidebar-content">
+                    <section class="llm-panel">
+                        <div class="card-title">Local LLM</div>
+                        <label class="llm-label" for="llm-endpoint">Endpoint</label>
+                        <div class="llm-row">
+                            <input id="llm-endpoint" class="llm-input" type="text" value="http://localhost:11434" />
+                            <button id="llm-refresh" class="llm-button">Refresh</button>
+                        </div>
+                        <label class="llm-label" for="llm-model">Model</label>
+                        <div class="llm-row">
+                            <select id="llm-model" class="llm-select"></select>
+                            <button id="llm-save" class="llm-button primary">Save</button>
+                        </div>
+                        <div class="llm-status" id="llm-status">No model selected</div>
+                    </section>
+                    <section class="llm-panel">
+                        <div class="card-title">Active Agent</div>
+                        <label class="llm-label" for="agent-select">Agent</label>
+                        <div class="llm-row">
+                            <select id="agent-select" class="llm-select"></select>
+                            <button id="agent-refresh" class="llm-button">Refresh</button>
+                        </div>
+                        <div class="llm-status" id="agent-status">Using agent1</div>
+                    </section>
+                    <section class="inventory-detail" id="inventory-detail">
+                        <div class="card-title">Inventory Detail</div>
+                        <div class="inventory-detail-body">
+                            <div class="inventory-detail-title" id="inventory-detail-title">Select an item</div>
+                            <div class="inventory-detail-desc" id="inventory-detail-desc">Choose a tool, resource, or prompt to inspect.</div>
+                            <div class="inventory-detail-meta" id="inventory-detail-meta"></div>
+                            <div class="inventory-detail-form" id="inventory-detail-form"></div>
+                            <div class="inventory-detail-actions" id="inventory-detail-actions"></div>
+                            <pre class="inventory-detail-output" id="inventory-detail-output"></pre>
+                        </div>
+                    </section>
                     <div class="tab-content active" id="tools-tab">
                         <div class="tool-list" id="tool-list">
                             <div class="empty-state">No tools available</div>
@@ -114,6 +193,20 @@
                     </div>
                 </div>
             </aside>
+        </div>
+    </div>
+    <div class="modal-overlay hidden" id="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-title">Modal</h3>
+                <button class="icon-button" id="modal-close" title="Close">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="modal-body" id="modal-body"></div>
+            <div class="modal-footer" id="modal-footer"></div>
         </div>
     </div>
 

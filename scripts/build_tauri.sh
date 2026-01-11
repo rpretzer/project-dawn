@@ -32,8 +32,8 @@ fi
 
 # Build Tauri application
 echo "Building Tauri application..."
-cd "$TAURI_DIR"
-cargo tauri build
+cd "$PROJECT_DIR"
+node scripts/tauri-build.js
 
 echo ""
 echo "✓ Build complete!"

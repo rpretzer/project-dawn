@@ -1,12 +1,12 @@
 {
   "name": "project-dawn",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Project Dawn - Decentralized Multi-Agent Network",
   "type": "module",
   "scripts": {
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
+    "tauri:build": "node scripts/tauri-build.js",
     "build:sidecar": "python scripts/build_python_sidecar.py",
     "build:all": "npm run build:sidecar && npm run tauri:build"
   },

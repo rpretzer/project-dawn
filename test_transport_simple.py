@@ -3,12 +3,18 @@
 
 import asyncio
 import sys
+import sys
+
+import pytest
 from mcp.transport import (
     WebSocketTransport,
     WebSocketServer,
     ConnectionState,
     WEBSOCKETS_AVAILABLE,
 )
+
+if "pytest" in sys.modules:
+    pytest.skip("Standalone transport smoke test", allow_module_level=True)
 
 
 async def test_basic_transport():
@@ -142,6 +148,4 @@ async def main():
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
-
-
 

@@ -8,9 +8,10 @@ Implements various peer discovery mechanisms:
 """
 
 import asyncio
-import logging
-import time
 import json
+import logging
+import socket
+import time
 from typing import List, Dict, Any, Optional, Callable, Set
 from .peer import Peer
 from .peer_registry import PeerRegistry
@@ -173,11 +174,15 @@ class MDNSDiscovery:
         try:
             # Parse address
             host = address.replace("ws://", "").replace("wss://", "").split(":")[0]
+            if host in {"localhost", "127.0.0.1"}:
+                ip_address = "127.0.0.1"
+            else:
+                ip_address = socket.gethostbyname(host)
             
             info = ServiceInfo(
                 self.SERVICE_TYPE,
                 f"{self.service_name}.{self.SERVICE_TYPE}",
-                addresses=[host],
+                addresses=[ip_address],
                 port=port,
                 properties={
                     b"node_id": node_id.encode('utf-8'),
@@ -577,4 +582,3 @@ class PeerDiscovery:
     def get_dht(self) -> Optional[DHT]:
         """Get DHT instance"""
         return self.dht
-

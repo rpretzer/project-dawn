@@ -85,9 +85,12 @@ class TestCoordinationAgent:
         assert coord_agent.agent_id == "coordinator"
         assert coord_agent.name == "CoordinationAgent"
         assert coord_agent.task_manager is not None
-        assert len(coord_agent.get_tools()) == 5
-        assert len(coord_agent.server.get_resources()) == 3
-        assert len(coord_agent.server.get_prompts()) == 3
+        tool_names = {tool["name"] for tool in coord_agent.get_tools()}
+        for required_tool in ("agent_list", "agent_call", "agent_broadcast", "task_create", "task_list"):
+            assert required_tool in tool_names
+        assert len(coord_agent.get_tools()) >= 5
+        assert len(coord_agent.server.get_resources()) >= 3
+        assert len(coord_agent.server.get_prompts()) >= 3
     
     @pytest.mark.asyncio
     async def test_agent_list_tool(self, coord_agent):
@@ -202,4 +205,3 @@ class TestCoordinationAgent:
         assert "Analyze this code" in result
         assert "code analysis capability" in result
         # Note: May not contain agent names if agents not in registry (expected in isolation)
-

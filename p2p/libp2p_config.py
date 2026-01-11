@@ -8,6 +8,8 @@ import os
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 
+from data_paths import data_root
+
 
 def get_libp2p_config(
     base_path: Optional[Path] = None,
@@ -23,7 +25,7 @@ def get_libp2p_config(
     Returns:
         Configuration dictionary
     """
-    base_path = base_path or Path("data")
+    base_path = base_path or data_root()
     
     config = {
         # Transport configuration

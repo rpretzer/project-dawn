@@ -55,8 +55,9 @@ class TestJSONRPCRequest:
         """Test converting to JSON"""
         req = JSONRPCRequest(method="test", params={"key": "value"})
         json_str = req.to_json()
-        assert '"method":"test"' in json_str
-        assert '"jsonrpc":"2.0"' in json_str
+        data = JSONRPCRequest.from_json(json_str).to_dict()
+        assert data["method"] == "test"
+        assert data["jsonrpc"] == "2.0"
     
     def test_from_json(self):
         """Test creating from JSON"""
@@ -235,6 +236,5 @@ class TestJSONRPCHandler:
         assert response is not None
         assert response.error is not None
         assert response.error.code == JSONRPCErrorCode.INVALID_REQUEST
-
 
 

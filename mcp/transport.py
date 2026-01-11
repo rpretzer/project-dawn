@@ -15,12 +15,13 @@ logger = logging.getLogger(__name__)
 # Try to import websockets, gracefully handle if not available
 try:
     import websockets
-    from websockets.server import WebSocketServerProtocol
-    from websockets.client import WebSocketClientProtocol
     try:
-        from websockets.asyncio.server import ServerConnection
+        from websockets.asyncio.client import connect as ws_connect
+        from websockets.asyncio.server import serve as ws_serve
         WEBSOCKETS_NEW_API = True
     except ImportError:
+        from websockets.client import connect as ws_connect
+        from websockets.server import serve as ws_serve
         WEBSOCKETS_NEW_API = False
     WEBSOCKETS_AVAILABLE = True
 except ImportError:
@@ -59,6 +60,7 @@ class WebSocketTransport:
         on_connect: Optional[Callable[[], Awaitable[None]]] = None,
         on_disconnect: Optional[Callable[[], Awaitable[None]]] = None,
         on_error: Optional[Callable[[Exception], Awaitable[None]]] = None,
+        auto_reconnect: bool = True,
     ):
         if not WEBSOCKETS_AVAILABLE:
             raise RuntimeError("websockets library not available")
@@ -67,9 +69,10 @@ class WebSocketTransport:
         self.on_connect = on_connect
         self.on_disconnect = on_disconnect
         self.on_error = on_error
+        self._auto_reconnect = auto_reconnect
         
         self.state = ConnectionState.DISCONNECTED
-        self.websocket: Optional[WebSocketServerProtocol] = None
+        self.websocket: Optional[Any] = None
         self._receive_task: Optional[asyncio.Task] = None
         self._reconnect_delay = 5.0  # seconds
         self._max_reconnect_attempts = 5
@@ -96,7 +99,7 @@ class WebSocketTransport:
         logger.info(f"Connecting to {uri}...")
         
         try:
-            async with websockets.connect(uri, **kwargs) as ws:
+            async with ws_connect(uri, **kwargs) as ws:
                 self.websocket = ws
                 self.state = ConnectionState.CONNECTED
                 self._reconnect_attempts = 0
@@ -120,7 +123,11 @@ class WebSocketTransport:
                 await self.on_error(e)
             
             # Attempt reconnection if handler is set
-            if self.message_handler and self._reconnect_attempts < self._max_reconnect_attempts:
+            if (
+                self.message_handler
+                and self._auto_reconnect
+                and self._reconnect_attempts < self._max_reconnect_attempts
+            ):
                 await self._reconnect(uri, **kwargs)
             else:
                 self.state = ConnectionState.DISCONNECTED
@@ -239,7 +246,7 @@ class WebSocketTransport:
         """
         logger.info(f"Starting WebSocket server on {host}:{port}")
         
-        async def handle_client(websocket: WebSocketServerProtocol, path: str):
+        async def handle_client(websocket: Any, path: str):
             """Handle client connection"""
             logger.info(f"Client connected from {websocket.remote_address}")
             self.websocket = websocket
@@ -271,7 +278,7 @@ class WebSocketTransport:
                 if self.on_disconnect:
                     await self.on_disconnect()
         
-        async with websockets.serve(handle_client, host, port, **kwargs):
+        async with ws_serve(handle_client, host, port, **kwargs):
             logger.info(f"WebSocket server running on ws://{host}:{port}")
             # Keep server running
             await asyncio.Future()  # Run forever
@@ -297,10 +304,13 @@ class WebSocketServer:
         self.on_connect = on_connect
         self.on_disconnect = on_disconnect
         
-        self.clients: Dict[Any, WebSocketServerProtocol] = {}
+        self.clients: Dict[Any, Any] = {}
         self.server = None
+        self.bound_port: Optional[int] = None
+        self._stop_event: Optional[asyncio.Event] = None
+        self._started_event: Optional[asyncio.Event] = None
     
-    async def handle_client(self, websocket: WebSocketServerProtocol, path: str):
+    async def handle_client(self, websocket: Any, path: str):
         """Handle client connection"""
         client_id = id(websocket)
         self.clients[client_id] = websocket
@@ -381,6 +391,8 @@ class WebSocketServer:
             **kwargs: Additional server arguments
         """
         logger.info(f"Starting WebSocket server on {host}:{port}")
+        self._stop_event = asyncio.Event()
+        self._started_event = asyncio.Event()
         
         if WEBSOCKETS_NEW_API:
             # New API (websockets 15.0+): handler receives ServerConnection
@@ -394,14 +406,18 @@ class WebSocketServer:
                 await self.handle_client(websocket, path)
         else:
             # Old API: handler receives (websocket, path)
-            async def handler(websocket: WebSocketServerProtocol, path: str = "/"):
+            async def handler(websocket: Any, path: str = "/"):
                 """Handler wrapper for old API"""
                 await self.handle_client(websocket, path)
         
-        async with websockets.serve(handler, host, port, **kwargs):
-            logger.info(f"WebSocket server running on ws://{host}:{port}")
-            # Keep server running
-            await asyncio.Future()  # Run forever
+        async with ws_serve(handler, host, port, **kwargs) as server:
+            self.server = server
+            sockets = getattr(server, "sockets", None)
+            if sockets:
+                self.bound_port = sockets[0].getsockname()[1]
+            self._started_event.set()
+            logger.info(f"WebSocket server running on ws://{host}:{self.bound_port or port}")
+            await self._stop_event.wait()
     
     async def stop(self) -> None:
         """Stop WebSocket server"""
@@ -413,5 +429,15 @@ class WebSocketServer:
                 pass
         
         self.clients.clear()
+        if self._stop_event:
+            self._stop_event.set()
         logger.info("WebSocket server stopped")
 
+    async def wait_started(self, timeout: Optional[float] = None) -> None:
+        """Wait until the server is accepting connections."""
+        if not self._started_event:
+            return
+        if timeout is None:
+            await self._started_event.wait()
+        else:
+            await asyncio.wait_for(self._started_event.wait(), timeout=timeout)

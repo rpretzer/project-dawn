@@ -1,6 +1,7 @@
 """Tests for WebSocket transport"""
 
 import asyncio
+import socket
 import pytest
 from mcp.transport import (
     WebSocketTransport,
@@ -8,6 +9,15 @@ from mcp.transport import (
     ConnectionState,
     WEBSOCKETS_AVAILABLE,
 )
+
+
+def _free_port() -> int:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+    except PermissionError:
+        pytest.skip("Socket operations not permitted in this environment")
 
 
 @pytest.mark.asyncio
@@ -25,10 +35,10 @@ async def test_websocket_server_client():
     
     # Start server
     server = WebSocketServer(message_handler=handle_message)
-    server_task = asyncio.create_task(server.start(host="localhost", port=8765))
-    
-    # Wait for server to start
-    await asyncio.sleep(0.1)
+    host = "127.0.0.1"
+    port = _free_port()
+    server_task = asyncio.create_task(server.start(host=host, port=port))
+    await server.wait_started(timeout=1.0)
     
     try:
         # Connect client
@@ -38,8 +48,8 @@ async def test_websocket_server_client():
             client_received.append(message)
             return None
         
-        client = WebSocketTransport(message_handler=client_handler)
-        client_task = asyncio.create_task(client.connect("ws://localhost:8765"))
+        client = WebSocketTransport(message_handler=client_handler, auto_reconnect=False)
+        client_task = asyncio.create_task(client.connect(f"ws://{host}:{port}"))
         
         # Wait for connection
         await asyncio.sleep(0.1)
@@ -95,8 +105,10 @@ async def test_websocket_broadcast():
         pytest.skip("websockets library not available")
     
     server = WebSocketServer()
-    server_task = asyncio.create_task(server.start(host="localhost", port=8766))
-    await asyncio.sleep(0.1)
+    host = "127.0.0.1"
+    port = _free_port()
+    server_task = asyncio.create_task(server.start(host=host, port=port))
+    await server.wait_started(timeout=1.0)
     
     try:
         # Connect multiple clients
@@ -110,8 +122,11 @@ async def test_websocket_broadcast():
                     return None
                 return handler
             
-            client = WebSocketTransport(message_handler=await make_handler(i))
-            task = asyncio.create_task(client.connect(f"ws://localhost:8766"))
+            client = WebSocketTransport(
+                message_handler=await make_handler(i),
+                auto_reconnect=False,
+            )
+            task = asyncio.create_task(client.connect(f"ws://{host}:{port}"))
             clients.append((client, task))
             await asyncio.sleep(0.1)
         
@@ -141,6 +156,3 @@ async def test_websocket_broadcast():
             await server_task
         except asyncio.CancelledError:
             pass
-
-
-

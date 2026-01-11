@@ -8,7 +8,7 @@
   },
   "package": {
     "productName": "Project Dawn",
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "tauri": {
     "allowlist": {
@@ -44,10 +44,11 @@
         "icons/512x512@2x.png"
       ],
       "resources": [
-        "sidecar/project-dawn-server"
+        "sidecar/project-dawn-server",
+        "sidecar/project-dawn-server.sha256"
       ],
       "externalBin": [
-        "project-dawn-server"
+        "bin/project-dawn-server"
       ],
       "copyright": "",
       "category": "Utility",

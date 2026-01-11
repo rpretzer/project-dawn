@@ -502,23 +502,11 @@ class EncryptedWebSocketServer:
     
     async def start(self, host: str = "localhost", port: int = 8000) -> None:
         """Start encrypted WebSocket server"""
-        # The underlying WebSocketServer.start() handles the server lifecycle
-        # We need to wrap it to keep it running
-        import asyncio
-        
-        async def run_server():
-            await self.server.start(host, port)
-        
-        # Start server in background task
-        asyncio.create_task(run_server())
         logger.info(f"Encrypted WebSocket server started on {host}:{port}")
-        
-        # Block indefinitely to keep server running
-        await asyncio.Future()
+        await self.server.start(host, port)
     
     async def stop(self) -> None:
         """Stop server"""
         await self.server.stop()
         self.client_sessions.clear()
         logger.info("Encrypted WebSocket server stopped")
-

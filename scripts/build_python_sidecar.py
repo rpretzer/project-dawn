@@ -9,6 +9,7 @@ with the Tauri application.
 import subprocess
 import sys
 from pathlib import Path
+import hashlib
 
 
 def build_with_pyinstaller():
@@ -36,6 +37,7 @@ def build_with_pyinstaller():
         "--add-data", f"{script_dir / 'crypto'}:crypto",
         "--add-data", f"{script_dir / 'consensus'}:consensus",
         "--add-data", f"{script_dir / 'host'}:host",
+        "--add-data", f"{script_dir / 'llm'}:llm",
         "--hidden-import", "asyncio",
         "--hidden-import", "websockets",
         "--hidden-import", "aiohttp",
@@ -47,6 +49,7 @@ def build_with_pyinstaller():
     
     try:
         result = subprocess.run(cmd, check=True)
+        _write_sha256(output_dir / "project-dawn-server")
         print(f"\n✓ Build successful!")
         print(f"Executable: {output_dir / 'project-dawn-server'}")
         if sys.platform == "win32":
@@ -85,6 +88,7 @@ def build_with_nuitka():
     
     try:
         result = subprocess.run(cmd, check=True)
+        _write_sha256(output_dir / "project-dawn-server")
         print(f"\n✓ Build successful!")
         print(f"Executable: {output_dir / 'project-dawn-server'}")
         if sys.platform == "win32":
@@ -114,6 +118,24 @@ def main():
             success = build_with_nuitka()
     
     sys.exit(0 if success else 1)
+
+
+def _write_sha256(executable_path: Path) -> None:
+    """Write a SHA-256 checksum file for the sidecar executable."""
+    candidates = [executable_path, executable_path.with_suffix(".exe")]
+    target = next((p for p in candidates if p.exists()), None)
+    if target is None:
+        print("Warning: sidecar executable not found for checksum")
+        return
+
+    digest = hashlib.sha256()
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    checksum_path = target.with_name(f"{target.name}.sha256")
+    checksum_path.write_text(f"{digest.hexdigest()}  {target.name}\n")
+    print(f"Checksum written: {checksum_path}")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,11 @@ Digital Signatures
 Message signing and verification using Ed25519.
 """
 
+import base64
+import binascii
+import hashlib
 import logging
+from pathlib import Path
 from typing import Optional
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import hashes
@@ -12,6 +16,8 @@ from cryptography.exceptions import InvalidSignature
 from .identity import NodeIdentity
 
 logger = logging.getLogger(__name__)
+
+_BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
 
 class MessageSigner:
@@ -169,4 +175,67 @@ def verify_signed_message(envelope: dict, public_key_bytes: bytes) -> Optional[b
         return None
 
 
+def _base58_encode(data: bytes) -> str:
+    if not data:
+        return ""
+    num = int.from_bytes(data, "big")
+    encoded = ""
+    while num > 0:
+        num, rem = divmod(num, 58)
+        encoded = _BASE58_ALPHABET[rem] + encoded
+    padding = 0
+    for byte in data:
+        if byte == 0:
+            padding += 1
+        else:
+            break
+    return _BASE58_ALPHABET[0] * padding + encoded
 
+
+def _extract_pgp_public_key_bytes(armored: str) -> bytes:
+    lines = [
+        line.strip()
+        for line in armored.splitlines()
+        if line.strip() and not line.startswith("-----")
+    ]
+    payload_lines = [line for line in lines if not line.startswith("=")]
+    if not payload_lines:
+        raise ValueError("No PGP payload found in armored key")
+    payload = "".join(payload_lines)
+    try:
+        return base64.b64decode(payload, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Invalid base64 payload in armored key") from exc
+
+
+def derive_peer_id_from_pgp_public_key(armored: str) -> str:
+    """
+    Derive a sovereign PeerID from a PGP public key block.
+    """
+    key_bytes = _extract_pgp_public_key_bytes(armored)
+    digest = hashlib.sha256(key_bytes).digest()
+    return _base58_encode(digest)
+
+
+def derive_peer_id_from_pgp_public_key_file(path: Path) -> str:
+    """
+    Derive a sovereign PeerID from a PGP public key file.
+    """
+    armored = Path(path).read_text(encoding="utf-8")
+    return derive_peer_id_from_pgp_public_key(armored)
+
+
+def pgp_fingerprint_from_public_key(armored: str) -> str:
+    """
+    Derive a stable fingerprint for a PGP public key.
+    """
+    key_bytes = _extract_pgp_public_key_bytes(armored)
+    return hashlib.sha256(key_bytes).hexdigest()
+
+
+def pgp_fingerprint_from_public_key_file(path: Path) -> str:
+    """
+    Derive a stable fingerprint for a PGP public key file.
+    """
+    armored = Path(path).read_text(encoding="utf-8")
+    return pgp_fingerprint_from_public_key(armored)

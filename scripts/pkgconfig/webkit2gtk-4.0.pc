@@ -1,0 +1,9 @@
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib64
+includedir=${prefix}/include
+
+Name: webkit2gtk-4.0
+Description: Compatibility shim for webkit2gtk-4.1
+Version: 4.1
+Requires: webkit2gtk-4.1
