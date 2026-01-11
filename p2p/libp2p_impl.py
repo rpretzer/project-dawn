@@ -15,7 +15,17 @@ logger = logging.getLogger(__name__)
 # Try to import py-libp2p
 # Note: py-libp2p API may vary by version. This implementation attempts to use
 # common patterns but may need adjustment based on actual library version.
+# Supports py-libp2p versions 0.1.0+ with fallback compatibility.
 try:
+    # Try to detect libp2p version for compatibility
+    LIBP2P_VERSION = None
+    try:
+        import libp2p
+        if hasattr(libp2p, '__version__'):
+            LIBP2P_VERSION = libp2p.__version__
+            logger.debug(f"Detected py-libp2p version: {LIBP2P_VERSION}")
+    except Exception:
+        pass
     # Try different import patterns based on py-libp2p version
     try:
         from libp2p import new_node
@@ -169,7 +179,12 @@ async def create_libp2p_host(
         if new_node_func is None:
             try:
                 import libp2p
-                new_node_func = getattr(libp2p, "new_node", None) or getattr(libp2p, "new_host", None)
+                # Try multiple API patterns for different versions
+                new_node_func = (
+                    getattr(libp2p, "new_node", None) or
+                    getattr(libp2p, "new_host", None) or
+                    getattr(libp2p, "create_host", None)
+                )
             except Exception:
                 new_node_func = None
 
@@ -178,25 +193,37 @@ async def create_libp2p_host(
                 params = {}
                 try:
                     param_names = set(inspect.signature(new_node_func).parameters.keys())
+                    logger.debug(f"new_node function accepts parameters: {sorted(param_names)}")
                 except Exception:
                     param_names = set()
 
+                # Try multiple parameter names for key pair (API version compatibility)
                 if "key_pair" in param_names:
                     params["key_pair"] = key_pair
                 elif "private_key" in param_names:
                     params["private_key"] = key_pair
+                elif "key" in param_names:
+                    params["key"] = key_pair
 
+                # Try multiple parameter names for listen addresses (API version compatibility)
                 if listen_multiaddrs:
                     if "listen_addrs" in param_names:
                         params["listen_addrs"] = listen_multiaddrs
                     elif "listen_addresses" in param_names:
                         params["listen_addresses"] = listen_multiaddrs
+                    elif "listen_addrs_list" in param_names:
+                        params["listen_addrs_list"] = listen_multiaddrs
                     elif "transport_opt" in param_names:
                         params["transport_opt"] = listen_multiaddrs
+                    elif "transports" in param_names:
+                        # Some versions expect transport configuration
+                        params["transports"] = listen_multiaddrs
 
                 host = await _maybe_await(new_node_func(**params))
+                if host:
+                    logger.debug(f"Successfully created libp2p host using {new_node_func.__name__}")
             except Exception as e:
-                logger.warning(f"new_node/new_host failed: {e}")
+                logger.warning(f"new_node/new_host failed (tried {new_node_func.__name__ if new_node_func else 'None'}): {e}", exc_info=True)
 
         if host is None:
             logger.error("Libp2p host creation failed (no compatible constructor available)")

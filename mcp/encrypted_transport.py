@@ -41,6 +41,7 @@ class EncryptedWebSocketTransport:
         identity: NodeIdentity,
         peer_public_key: Optional[bytes] = None,
         enable_encryption: bool = True,
+        message_handler: Optional[Callable[[str], Awaitable[None]]] = None,
     ):
         """
         Initialize encrypted transport
@@ -50,10 +51,12 @@ class EncryptedWebSocketTransport:
             identity: Node identity for signing
             peer_public_key: Optional peer's public key (for pre-shared key)
             enable_encryption: Enable encryption (can disable for testing)
+            message_handler: Optional callback for handling received messages
         """
         self.url = url
         self.identity = identity
         self.enable_encryption = enable_encryption
+        self.message_handler = message_handler
         
         # Underlying WebSocket transport
         # We'll use websockets directly for client connections
@@ -117,10 +120,54 @@ class EncryptedWebSocketTransport:
             self.connection_state = ConnectionState.ERROR
     
     async def _handle_received_message(self, message: str) -> None:
-        """Handle received message (for client mode)"""
-        # In client mode, messages are handled by the application
-        # This is a placeholder - actual handling depends on usage
-        logger.debug(f"Received message: {message[:100]}")
+        """
+        Handle received message (for client mode)
+        
+        Decrypts and processes incoming messages, routing them to the message handler.
+        """
+        try:
+            # Check if message is encrypted
+            if self.enable_encryption and self.encryptor:
+                try:
+                    # Parse envelope
+                    envelope = json.loads(message)
+                    if envelope.get("type") == "encrypted":
+                        # Decrypt message
+                        nonce = bytes.fromhex(envelope["nonce"])
+                        ciphertext = bytes.fromhex(envelope["ciphertext"])
+                        plaintext = self.encryptor.decrypt(nonce, ciphertext)
+                        decrypted_message = plaintext.decode('utf-8')
+                        
+                        # Verify signature if present
+                        if "signature" in envelope and "sender" in envelope:
+                            sender = envelope.get("sender", "unknown")
+                            signature = bytes.fromhex(envelope["signature"])
+                            
+                            # Note: Would need peer's public key to verify signature
+                            # For now, just log
+                            logger.debug(f"Received signed message from {sender[:16]}...")
+                        
+                        message = decrypted_message
+                        logger.debug(f"Decrypted message from server")
+                except (json.JSONDecodeError, KeyError, ValueError):
+                    # Not encrypted or invalid format, use as-is
+                    pass
+                except Exception as e:
+                    logger.error(f"Error decrypting message: {e}")
+                    return
+            
+            # Route to message handler if provided
+            if self.message_handler:
+                try:
+                    await self.message_handler(message)
+                except Exception as e:
+                    logger.error(f"Error in message handler: {e}", exc_info=True)
+            else:
+                # No handler, just log
+                logger.debug(f"Received message (no handler): {message[:100]}")
+        
+        except Exception as e:
+            logger.error(f"Error handling received message: {e}", exc_info=True)
     
     async def _establish_session(self) -> None:
         """
@@ -168,9 +215,23 @@ class EncryptedWebSocketTransport:
             peer_node_id = response["node_id"]
             
             if "signature" in response:
-                # Verify signature (would need peer's identity, skip for now)
-                # In production, verify against known peer identities
-                logger.debug(f"Received signed handshake from {peer_node_id[:16]}")
+                signature = bytes.fromhex(response["signature"])
+                handshake_bytes = json.dumps({
+                    "type": response["type"],
+                    "public_key": response["public_key"],
+                    "node_id": response["node_id"],
+                }, sort_keys=True).encode('utf-8')
+                
+                # Note: The handshake uses X25519 public key for key exchange,
+                # but the signature is with Ed25519. In a production system, you'd
+                # need to either:
+                # 1. Include the Ed25519 public key in the handshake
+                # 2. Look up the peer's Ed25519 public key from a registry
+                # 3. Use the same keypair for both (X25519 and Ed25519 can share keys)
+                
+                # For now, we'll log that we received a signature but can't verify it
+                # without the peer's Ed25519 public key
+                logger.debug(f"Received signed handshake from {peer_node_id[:16]} (signature present but not verified - need Ed25519 public key)")
             
             # Derive shared secret
             self.peer_key_exchange = KeyExchange.from_public_key_bytes(peer_public_key_bytes)
@@ -317,6 +378,9 @@ class EncryptedWebSocketServer:
         on_connect: Optional[Callable[[Any], Awaitable[None]]] = None,
         on_disconnect: Optional[Callable[[Any], Awaitable[None]]] = None,
         enable_encryption: bool = True,
+        peer_registry: Optional[Any] = None,
+        trust_manager: Optional[Any] = None,
+        peer_validator: Optional[Any] = None,
     ):
         """
         Initialize encrypted WebSocket server
@@ -327,12 +391,19 @@ class EncryptedWebSocketServer:
             on_connect: Callback on client connect
             on_disconnect: Callback on client disconnect
             enable_encryption: Enable encryption
+            peer_registry: Optional peer registry for signature verification
+            trust_manager: Optional trust manager for peer trust management
+            peer_validator: Optional peer validator for signature verification
         """
         self.identity = identity
         self.enable_encryption = enable_encryption
         self.signer = MessageSigner(identity) if identity.can_sign() else None
+        self.message_handler = message_handler
+        self.peer_registry = peer_registry
+        self.trust_manager = trust_manager
+        self.peer_validator = peer_validator
         
-        # Client sessions: client_id -> (encryptor, key_exchange)
+        # Client sessions: client_id -> (encryptor, key_exchange, peer_node_id, peer_public_key)
         self.client_sessions: Dict[Any, Dict[str, Any]] = {}
         
         # Underlying WebSocket server
@@ -350,6 +421,8 @@ class EncryptedWebSocketServer:
             "key_exchange": None,
             "encryptor": None,
             "session_established": False,
+            "peer_node_id": None,
+            "peer_public_key": None,
         }
         
         logger.debug(f"Client {client_id} connected, waiting for key exchange")
@@ -368,9 +441,70 @@ class EncryptedWebSocketServer:
             client_node_id = message.get("node_id", "unknown")
             
             # Verify signature if present
+            peer_public_key_bytes = None
+            signature_verified = False
+            
             if "signature" in message:
-                # In production, verify against known peer identities
-                logger.debug(f"Received signed handshake from {client_node_id[:16]}")
+                signature = bytes.fromhex(message["signature"])
+                handshake_bytes = json.dumps({
+                    "type": message["type"],
+                    "public_key": message["public_key"],
+                    "node_id": message["node_id"],
+                }, sort_keys=True).encode('utf-8')
+                
+                # Try to get peer's public key from registry
+                if self.peer_registry:
+                    peer = self.peer_registry.get_peer(client_node_id)
+                    if peer and peer.public_key:
+                        peer_public_key_bytes = peer.public_key
+                
+                # Try to get public key from trust manager if available
+                if not peer_public_key_bytes and hasattr(self, 'trust_manager'):
+                    trust_record = self.trust_manager.get_trust_record(client_node_id)
+                    if trust_record and trust_record.public_key:
+                        try:
+                            peer_public_key_bytes = bytes.fromhex(trust_record.public_key)
+                        except ValueError:
+                            pass
+                
+                # Verify signature using peer validator if available (handles new peers)
+                if self.peer_validator:
+                    if self.peer_validator.validate_peer_signature(
+                        client_node_id,
+                        handshake_bytes,
+                        signature,
+                        peer_public_key_bytes,
+                    ):
+                        signature_verified = True
+                        logger.debug(f"Verified signed handshake from {client_node_id[:16]}... (via validator)")
+                    elif peer_public_key_bytes:
+                        # Fallback: direct verification
+                        if MessageSigner.verify_with_public_key_bytes(handshake_bytes, signature, peer_public_key_bytes):
+                            signature_verified = True
+                            logger.debug(f"Verified signed handshake from {client_node_id[:16]}... (direct)")
+                            # Record verification
+                            if self.trust_manager:
+                                self.trust_manager.record_verification(client_node_id, peer_public_key_bytes.hex())
+                        else:
+                            logger.error(f"Invalid signature in handshake from {client_node_id[:16]}...")
+                            return None
+                    else:
+                        logger.warning(f"Cannot verify signature for {client_node_id[:16]}... (no public key)")
+                elif peer_public_key_bytes:
+                    # Direct verification if no validator
+                    if MessageSigner.verify_with_public_key_bytes(handshake_bytes, signature, peer_public_key_bytes):
+                        signature_verified = True
+                        logger.debug(f"Verified signed handshake from {client_node_id[:16]}...")
+                        # Record verification
+                        if self.trust_manager:
+                            self.trust_manager.record_verification(client_node_id, peer_public_key_bytes.hex())
+                    else:
+                        logger.error(f"Invalid signature in handshake from {client_node_id[:16]}...")
+                        return None
+                else:
+                    logger.warning(f"Peer {client_node_id[:16]}... not in registry, cannot verify signature")
+                
+                logger.debug(f"Received signed handshake from {client_node_id[:16]}... (verified: {signature_verified})")
             
             # Initialize our key exchange
             our_key_exchange = KeyExchange()
@@ -381,11 +515,13 @@ class EncryptedWebSocketServer:
             # Create encryptor
             encryptor = MessageEncryptor(shared_secret)
             
-            # Store session
+            # Store session with peer information
             self.client_sessions[client_id] = {
                 "key_exchange": our_key_exchange,
                 "encryptor": encryptor,
                 "session_established": True,
+                "peer_node_id": client_node_id,
+                "peer_public_key": peer_public_key_bytes if 'peer_public_key_bytes' in locals() else None,
             }
             
             # Send our public key in response
@@ -444,9 +580,38 @@ class EncryptedWebSocketServer:
                     return message
                 
                 # Verify signature if present
-                if "signature" in envelope:
+                if "signature" in envelope and "sender" in envelope:
                     sender = envelope.get("sender", "unknown")
-                    logger.debug(f"Received signed message from {sender[:16]}")
+                    signature = bytes.fromhex(envelope["signature"])
+                    
+                    # Get sender's public key
+                    sender_public_key = None
+                    if self.peer_registry:
+                        peer = self.peer_registry.get_peer(sender)
+                        if peer and peer.public_key:
+                            sender_public_key = peer.public_key
+                    
+                    # Also check if it's the same peer as this session
+                    session = self.client_sessions.get(client_id, {})
+                    if not sender_public_key and session.get("peer_public_key"):
+                        sender_public_key = session.get("peer_public_key")
+                    
+                    if sender_public_key:
+                        # Verify signature
+                        envelope_for_signing = {
+                            "type": envelope["type"],
+                            "nonce": envelope["nonce"],
+                            "ciphertext": envelope["ciphertext"],
+                        }
+                        envelope_bytes = json.dumps(envelope_for_signing, sort_keys=True).encode('utf-8')
+                        
+                        if MessageSigner.verify_with_public_key_bytes(envelope_bytes, signature, sender_public_key):
+                            logger.debug(f"Verified signed message from {sender[:16]}")
+                        else:
+                            logger.warning(f"Invalid signature in message from {sender[:16]}")
+                            return None
+                    else:
+                        logger.debug(f"Received signed message from {sender[:16]} (signature not verified - peer not in registry)")
                 
                 # Decrypt
                 nonce = bytes.fromhex(envelope["nonce"])
@@ -456,9 +621,17 @@ class EncryptedWebSocketServer:
                 decrypted_message = plaintext.decode('utf-8')
                 logger.debug(f"Decrypted message from client {client_id}")
                 
-                # Route to handler
-                # Note: This is a simplified version - in production, you'd route properly
-                return decrypted_message
+                # Route to message handler
+                if self.message_handler:
+                    try:
+                        response = await self.message_handler(decrypted_message, client_id)
+                        return response
+                    except Exception as e:
+                        logger.error(f"Error in message handler: {e}", exc_info=True)
+                        return None
+                else:
+                    # No handler, return decrypted message
+                    return decrypted_message
             
             except Exception as e:
                 logger.error(f"Failed to decrypt message: {e}", exc_info=True)

@@ -134,8 +134,11 @@ class MDNSDiscovery:
                             node_id=node_id,
                             address=address,
                         )
-                        self.registry.add_peer(peer)
-                        logger.info(f"Discovered peer via mDNS: {node_id[:16]}... ({address})")
+                        # Add peer with validation (will check trust)
+                        if self.registry.add_peer(peer):
+                            logger.info(f"Discovered peer via mDNS: {node_id[:16]}... ({address})")
+                        else:
+                            logger.debug(f"Rejected discovered peer via mDNS: {node_id[:16]}... (not trusted)")
                 
                 def remove_service(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
                     logger.debug(f"Service removed: {name}")

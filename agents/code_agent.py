@@ -898,20 +898,132 @@ class CodeAgent(BaseAgent):
             Formatted code
         """
         try:
-            # For now, return code as-is with a note
-            # In production, would use formatters like black, prettier, etc.
+            language_lower = language.lower()
+            formatted_code = code
+            
+            # Python formatting using black (if available)
+            if language_lower in ("python", "py"):
+                try:
+                    import black
+                    mode = black.FileMode()
+                    if style != "auto":
+                        # Parse style options if provided
+                        if "line-length" in style.lower():
+                            try:
+                                line_length = int(re.search(r'line-length[=:]\s*(\d+)', style).group(1))
+                                mode = black.FileMode(line_length=line_length)
+                            except (AttributeError, ValueError):
+                                pass
+                    formatted_code = black.format_str(code, mode=mode)
+                    logger.debug(f"Formatted Python code using black")
+                except ImportError:
+                    # Fallback: basic Python formatting using autopep8 or manual formatting
+                    try:
+                        import autopep8
+                        formatted_code = autopep8.fix_code(code, options={'aggressive': 1})
+                        logger.debug(f"Formatted Python code using autopep8")
+                    except ImportError:
+                        # Last resort: basic formatting (normalize whitespace)
+                        lines = code.split('\n')
+                        formatted_lines = []
+                        indent_level = 0
+                        for line in lines:
+                            stripped = line.strip()
+                            if not stripped:
+                                formatted_lines.append('')
+                                continue
+                            # Adjust indent based on line content
+                            if stripped.endswith(':'):
+                                formatted_lines.append(' ' * (indent_level * 4) + stripped)
+                                indent_level += 1
+                            elif stripped.startswith(('return ', 'break', 'continue', 'pass', 'raise ', 'assert ')):
+                                indent_level = max(0, indent_level - 1)
+                                formatted_lines.append(' ' * (indent_level * 4) + stripped)
+                            else:
+                                formatted_lines.append(' ' * (indent_level * 4) + stripped)
+                            # Decrease indent after certain statements
+                            if any(stripped.startswith(x) for x in ('return', 'break', 'continue', 'pass', 'raise', 'assert')):
+                                indent_level = max(0, indent_level - 1)
+                        formatted_code = '\n'.join(formatted_lines)
+                        logger.debug(f"Formatted Python code using basic formatter")
+            
+            # JavaScript/TypeScript formatting using prettier (if available via subprocess)
+            elif language_lower in ("javascript", "js", "typescript", "ts", "jsx", "tsx"):
+                try:
+                    result = subprocess.run(
+                        ["prettier", "--stdin-filepath", f"code.{language_lower}"],
+                        input=code,
+                        text=True,
+                        capture_output=True,
+                        timeout=5.0,
+                    )
+                    if result.returncode == 0:
+                        formatted_code = result.stdout
+                        logger.debug(f"Formatted {language} code using prettier")
+                    else:
+                        logger.warning(f"Prettier failed: {result.stderr}")
+                except (subprocess.TimeoutExpired, FileNotFoundError):
+                    # Fallback: basic JavaScript formatting
+                    formatted_code = code  # Keep as-is if prettier not available
+                    logger.debug(f"Prettier not available, code kept as-is")
+            
+            # JSON formatting
+            elif language_lower == "json":
+                try:
+                    parsed = json.loads(code)
+                    formatted_code = json.dumps(parsed, indent=2, sort_keys=True)
+                    logger.debug(f"Formatted JSON code")
+                except json.JSONDecodeError:
+                    formatted_code = code  # Invalid JSON, return as-is
+            
+            # YAML formatting (basic)
+            elif language_lower in ("yaml", "yml"):
+                try:
+                    import yaml
+                    parsed = yaml.safe_load(code)
+                    formatted_code = yaml.dump(parsed, default_flow_style=False, sort_keys=False)
+                    logger.debug(f"Formatted YAML code")
+                except ImportError:
+                    formatted_code = code  # Keep as-is if PyYAML not available
+                except yaml.YAMLError:
+                    formatted_code = code  # Invalid YAML, return as-is
+            
+            # HTML/XML formatting (basic indentation)
+            elif language_lower in ("html", "xml"):
+                try:
+                    import xml.dom.minidom
+                    parsed = xml.dom.minidom.parseString(code)
+                    formatted_code = parsed.toprettyxml(indent="  ")
+                    # Remove extra blank lines
+                    lines = [line for line in formatted_code.split('\n') if line.strip()]
+                    formatted_code = '\n'.join(lines)
+                    logger.debug(f"Formatted {language} code")
+                except Exception:
+                    formatted_code = code  # Keep as-is if formatting fails
+            
+            # Default: normalize whitespace
+            else:
+                # Basic formatting: normalize line endings and trailing whitespace
+                lines = code.splitlines()
+                formatted_lines = [line.rstrip() for line in lines]
+                formatted_code = '\n'.join(formatted_lines)
+                if code.endswith('\n'):
+                    formatted_code += '\n'
+                logger.debug(f"Applied basic formatting to {language} code")
+            
             return {
                 "success": True,
-                "formatted_code": code,
+                "formatted_code": formatted_code,
                 "language": language,
                 "style": style,
-                "note": "Formatting is a placeholder - integrate with actual formatters",
+                "changed": formatted_code != code,
             }
         except Exception as e:
-            logger.error(f"Error formatting code: {e}")
+            logger.error(f"Error formatting code: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": f"Failed to format code: {str(e)}",
+                "formatted_code": code,  # Return original code on error
             }
     
     async def _code_test(

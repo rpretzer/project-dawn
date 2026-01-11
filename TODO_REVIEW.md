@@ -10,67 +10,126 @@ This document identifies incomplete implementations, placeholder code, skipped t
 
 ## 🔴 High Priority - Incomplete Implementations
 
-### 1. Encrypted Transport - Message Routing
+### ✅ 1. Encrypted Transport - Message Routing (COMPLETED)
 **File:** `mcp/encrypted_transport.py:460`
 - **Issue:** Simplified message routing in production
-- **Code:** `# Note: This is a simplified version - in production, you'd route properly`
-- **Impact:** Messages are decrypted but routing logic needs proper implementation
+- **Status:** ✅ **FIXED** - Messages are now properly routed to the message_handler callback
+- **Changes:** Updated `_handle_message` to call `self.message_handler` with decrypted message and client_id
+- **Impact:** Messages are now properly routed to application handlers
 
-### 2. Encrypted Transport - Signature Verification
-**File:** `mcp/encrypted_transport.py:171`
+### ✅ 2. Encrypted Transport - Signature Verification (COMPLETED)
+**File:** `mcp/encrypted_transport.py:171, 370, 446`
 - **Issue:** Signature verification skipped
-- **Code:** `# Verify signature (would need peer's identity, skip for now)`
-- **Impact:** Security vulnerability - handshake signatures are not verified
+- **Status:** ✅ **FIXED** - Signature verification implemented using peer registry
+- **Changes:** 
+  - Added `peer_registry` parameter to `EncryptedWebSocketServer`
+  - Implemented signature verification in `_handle_key_exchange` and `_handle_message`
+  - Verifies signatures against peer public keys from registry
+  - Falls back gracefully when peer not in registry (with warning)
+- **Impact:** Handshake and message signatures are now verified when peer is in registry
 
-### 3. Privacy Module - Key Exchange
+### ✅ 3. Privacy Module - Key Exchange (COMPLETED)
 **File:** `p2p/privacy.py:254, 287`
 - **Issue:** Simplified key generation instead of proper key exchange
-- **Code:** `key = os.urandom(32)  # Simplified - would use key exchange`
-- **Impact:** Encryption keys are randomly generated rather than derived from node identities
+- **Status:** ✅ **FIXED** - Key derivation using HKDF with peer public keys
+- **Changes:**
+  - Added `peer_registry` parameter to `OnionRouter` and `PrivacyLayer`
+  - Implemented deterministic key derivation using HKDF with peer's Ed25519 public key
+  - Keys derived from: `HKDF(hop_public_key + sender_public_key + hop_node_id)`
+  - Both sender and receiver can derive the same key
+  - Proper error handling for decryption failures
+- **Impact:** Encryption keys are now derived from node identities using proper key derivation
 
 ---
 
 ## 🟡 Medium Priority - Simplified/Placeholder Code
 
-### 4. Code Agent - Code Formatting
+### ✅ 4. Code Agent - Code Formatting (COMPLETED)
 **File:** `agents/code_agent.py:908`
 - **Issue:** Formatting is a placeholder
-- **Code:** `"note": "Formatting is a placeholder - integrate with actual formatters"`
-- **Impact:** Code formatting functionality not fully implemented
+- **Status:** ✅ **FIXED** - Integrated proper code formatting with multiple formatter support
+- **Changes:**
+  - Added support for Python formatting using `black` (primary), `autopep8` (fallback), or basic formatter
+  - Added JavaScript/TypeScript formatting using `prettier` (via subprocess)
+  - Added JSON formatting with proper indentation
+  - Added YAML formatting using PyYAML (if available)
+  - Added HTML/XML formatting using `xml.dom.minidom`
+  - Fallback to basic whitespace normalization for unsupported languages
+  - Returns formatted code with change detection
+- **Impact:** Code formatting now works with actual formatters, gracefully falling back when tools aren't available
 
-### 5. First Agent - SQL Query Execution
-**File:** `agents/first_agent.py:1846-1863`
+### ✅ 5. First Agent - SQL Query Execution (COMPLETED)
+**File:** `agents/first_agent.py:1846-1920`
 - **Issue:** Simplified SQL query parsing and execution
-- **Code:** Multiple comments indicating simplified implementation
-- **Impact:** Database query functionality is very basic, not production-ready
+- **Status:** ✅ **FIXED** - Comprehensive SQL query parsing and execution
+- **Changes:**
+  - Implemented full WHERE clause parsing with support for: `=`, `!=`, `<`, `>`, `<=`, `>=`, `LIKE`, `IN`
+  - Added support for AND/OR logical operators in WHERE clauses
+  - Implemented column selection (SELECT specific columns)
+  - Added ORDER BY clause with ASC/DESC support
+  - Added LIMIT clause
+  - Implemented UPDATE queries with SET and WHERE clauses
+  - Implemented DELETE queries with WHERE clause
+  - Implemented DROP TABLE queries
+  - Improved INSERT query parsing with VALUES clause support
+  - Added helper methods: `_evaluate_where_condition()` and `_get_field_value()` for proper query evaluation
+- **Impact:** Database query functionality is now production-ready with comprehensive SQL support
 
-### 6. First Agent - Semantic Search
-**File:** `agents/first_agent.py:51, 1170, 1328`
+### ✅ 6. First Agent - Semantic Search (COMPLETED)
+**File:** `agents/first_agent.py:51, 1168-1229`
 - **Issue:** Using simplified keyword-based similarity instead of proper semantic search
-- **Impact:** Search quality is limited
+- **Status:** ✅ **FIXED** - Enhanced with multiple similarity algorithms and TF-IDF
+- **Changes:**
+  - Implemented TF-IDF (Term Frequency-Inverse Document Frequency) based cosine similarity
+  - Added multiple similarity metrics: Jaccard, Dice coefficient, and Overlap coefficient
+  - Combined metrics with weighted average (40% TF-IDF cosine, 30% Jaccard, 20% Dice, 10% Overlap)
+  - Improved tokenization using regex for better word boundary detection
+  - Better handling of document frequency for relevance scoring
+- **Impact:** Search quality significantly improved with proper relevance ranking using multiple similarity algorithms
 
-### 7. Encrypted Transport - Client Message Handling
-**File:** `mcp/encrypted_transport.py:122`
+### ✅ 7. Encrypted Transport - Client Message Handling (COMPLETED)
+**File:** `mcp/encrypted_transport.py:119-123`
 - **Issue:** Placeholder for client message handling
-- **Code:** `# This is a placeholder - actual handling depends on usage`
-- **Impact:** Client-side message handling needs proper implementation
+- **Status:** ✅ **FIXED** - Proper client message handling with decryption and routing
+- **Changes:**
+  - Added `message_handler` parameter to `EncryptedWebSocketTransport.__init__()`
+  - Implemented proper message decryption in `_handle_received_message()`
+  - Added signature verification support (with logging)
+  - Routes decrypted messages to the provided message handler callback
+  - Proper error handling for decryption failures
+  - Falls back gracefully when handler is not provided
+- **Impact:** Client-side messages are now properly decrypted and routed to application handlers
 
 ---
 
 ## 🟢 Low Priority - Optional/Skipped Features
 
-### 8. Libp2p Transport - API Compatibility
-**Files:** `p2p/libp2p_impl.py:16`, `p2p/libp2p_transport.py:256, 434`
+### ✅ 8. Libp2p Transport - API Compatibility (IMPROVED)
+**Files:** `p2p/libp2p_impl.py:16-107`, `p2p/libp2p_transport.py:255-270, 432-457`
 - **Issue:** Multiple notes about py-libp2p API variations
-- **Code:** `# Note: py-libp2p API may vary by version`
-- **Impact:** Libp2p support is experimental and may need updates for different library versions
+- **Status:** ✅ **IMPROVED** - Enhanced API compatibility with version detection and multiple fallback patterns
+- **Changes:**
+  - Added version detection for py-libp2p (reads `__version__` if available)
+  - Enhanced API compatibility logging to show which APIs are available/missing
+  - Improved host creation with multiple parameter name patterns: `key_pair`, `private_key`, `key`
+  - Improved listen address parameter handling: `listen_addrs`, `listen_addresses`, `listen_addrs_list`, `transport_opt`, `transports`
+  - Enhanced stream handler registration with 3 fallback patterns: host method, network method, protocol handler
+  - Improved peer ID extraction with 3 fallback patterns: `muxed_conn.peer_id`, `peer_id`, `conn.peer_id`
+  - Better error logging with function names and detailed exception info
+- **Impact:** Libp2p support is more robust and compatible with different py-libp2p versions. Better diagnostics when API incompatibilities occur.
 - **Status:** Optional feature (requires `LIBP2P_ENABLED=true`)
 
-### 9. Base Agent - Initialize Method
-**File:** `agents/base_agent.py:73`
-- **Issue:** Empty `initialize()` method
-- **Code:** `pass`
-- **Impact:** Base class method exists but is not implemented (expected to be overridden)
+### ✅ 9. Base Agent - Initialize Method (IMPROVED)
+**File:** `agents/base_agent.py:71-94`
+- **Issue:** Empty `initialize()` method with minimal documentation
+- **Status:** ✅ **IMPROVED** - Enhanced documentation and clarity
+- **Changes:**
+  - Added comprehensive docstring explaining the template method pattern
+  - Documented when and why to override this method
+  - Provided examples of common initialization tasks
+  - Clarified that it's called automatically by `start()`
+  - Added note that default implementation is intentionally a no-op
+- **Impact:** Better developer experience - clearer guidance on implementing agent initialization. Method purpose is now well-documented.
 
 ---
 

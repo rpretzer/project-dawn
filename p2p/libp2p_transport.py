@@ -253,21 +253,45 @@ class Libp2pTransport:
             protocol_id = "/project-dawn/1.0.0"
             
             # Register stream handler
-            # Note: py-libp2p API may vary, this is a simplified approach
+            # py-libp2p API varies by version - try multiple patterns for compatibility
             async def handle_stream(stream: INetStream):
                 """Handle incoming stream"""
                 await self._handle_stream(stream)
 
+            handler_registered = False
+            
+            # Try multiple API patterns for different py-libp2p versions
+            # Pattern 1: Direct host method (newer versions)
             if hasattr(self.host, "set_stream_handler"):
-                self.host.set_stream_handler(protocol_id, handle_stream)
-                logger.debug("Stream handler registered on host")
-            else:
+                try:
+                    self.host.set_stream_handler(protocol_id, handle_stream)
+                    logger.debug("Stream handler registered on host (direct method)")
+                    handler_registered = True
+                except Exception as e:
+                    logger.debug(f"Failed to register handler via host method: {e}")
+            
+            # Pattern 2: Network-level handler (older versions)
+            if not handler_registered:
                 network = self.host.get_network() if hasattr(self.host, "get_network") else None
                 if network and hasattr(network, "set_stream_handler"):
-                    network.set_stream_handler(protocol_id, handle_stream)
-                    logger.debug("Stream handler registered on network")
-                else:
-                    logger.warning("Stream handler registration not supported by libp2p host")
+                    try:
+                        network.set_stream_handler(protocol_id, handle_stream)
+                        logger.debug("Stream handler registered on network")
+                        handler_registered = True
+                    except Exception as e:
+                        logger.debug(f"Failed to register handler via network method: {e}")
+            
+            # Pattern 3: Protocol handler (alternative API)
+            if not handler_registered and hasattr(self.host, "set_protocol_handler"):
+                try:
+                    self.host.set_protocol_handler(protocol_id, handle_stream)
+                    logger.debug("Stream handler registered via protocol handler")
+                    handler_registered = True
+                except Exception as e:
+                    logger.debug(f"Failed to register handler via protocol method: {e}")
+            
+            if not handler_registered:
+                logger.warning(f"Could not register stream handler - libp2p API may be incompatible")
         
         except Exception as e:
             logger.warning(f"Failed to set up stream handler: {e}")
@@ -431,12 +455,36 @@ class Libp2pTransport:
         
         try:
             # Get peer ID from stream
-            # Note: API may vary by py-libp2p version
+            # API varies by py-libp2p version - try multiple patterns for compatibility
+            peer_id = None
+            
+            # Pattern 1: Direct muxed_conn access (common pattern)
             try:
-                peer_id_obj = stream.muxed_conn.peer_id
-                peer_id = peer_id_obj.to_string() if hasattr(peer_id_obj, 'to_string') else str(peer_id_obj)
-            except Exception:
-                # Fallback: use connection info
+                if hasattr(stream, 'muxed_conn') and stream.muxed_conn:
+                    peer_id_obj = stream.muxed_conn.peer_id
+                    peer_id = peer_id_obj.to_string() if hasattr(peer_id_obj, 'to_string') else str(peer_id_obj)
+            except (AttributeError, TypeError):
+                pass
+            
+            # Pattern 2: Direct peer_id attribute
+            if not peer_id and hasattr(stream, 'peer_id'):
+                try:
+                    peer_id_obj = stream.peer_id
+                    peer_id = peer_id_obj.to_string() if hasattr(peer_id_obj, 'to_string') else str(peer_id_obj)
+                except (AttributeError, TypeError):
+                    pass
+            
+            # Pattern 3: Connection peer_id
+            if not peer_id and hasattr(stream, 'conn') and stream.conn:
+                try:
+                    if hasattr(stream.conn, 'peer_id'):
+                        peer_id_obj = stream.conn.peer_id
+                        peer_id = peer_id_obj.to_string() if hasattr(peer_id_obj, 'to_string') else str(peer_id_obj)
+                except (AttributeError, TypeError):
+                    pass
+            
+            # Fallback: use connection info if available
+            if not peer_id:
                 peer_id = f"peer_{id(stream)}"
             
             self.peer_streams[peer_id] = stream

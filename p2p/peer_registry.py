@@ -19,28 +19,40 @@ class PeerRegistry:
     Maintains a registry of known peers with health tracking.
     """
     
-    def __init__(self, peer_timeout: float = 300.0):
+    def __init__(self, peer_timeout: float = 300.0, peer_validator: Optional[Any] = None):
         """
         Initialize peer registry
         
         Args:
             peer_timeout: Seconds before considering peer dead (default 5 minutes)
+            peer_validator: Optional peer validator for trust checks
         """
         self.peers: Dict[str, Peer] = {}  # node_id -> Peer
         self.peer_timeout = peer_timeout
+        self.peer_validator = peer_validator
         self.on_peer_added: Optional[Callable[[Peer], None]] = None
         self.on_peer_removed: Optional[Callable[[Peer], None]] = None
         self.on_peer_updated: Optional[Callable[[Peer], None]] = None
         
         logger.debug("PeerRegistry initialized")
     
-    def add_peer(self, peer: Peer) -> None:
+    def add_peer(self, peer: Peer, skip_validation: bool = False) -> bool:
         """
         Add or update peer in registry
         
         Args:
             peer: Peer to add/update
+            skip_validation: Skip trust validation (for bootstrap/trusted peers)
+            
+        Returns:
+            True if peer was added/updated, False if rejected
         """
+        # Validate peer if validator is available
+        if self.peer_validator and not skip_validation:
+            if not self.peer_validator.can_connect(peer.node_id):
+                logger.warning(f"Rejected peer {peer.node_id[:16]}... (not trusted)")
+                return False
+        
         is_new = peer.node_id not in self.peers
         
         if is_new:
@@ -55,6 +67,8 @@ class PeerRegistry:
             logger.debug(f"Updated peer: {peer.node_id[:16]}...")
             if self.on_peer_updated:
                 self.on_peer_updated(peer)
+        
+        return True
     
     def remove_peer(self, node_id: str) -> Optional[Peer]:
         """

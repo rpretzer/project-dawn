@@ -16,6 +16,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import os
 
 from crypto import NodeIdentity, MessageEncryptor, KeyExchange
@@ -190,17 +192,28 @@ class OnionRouter:
     the next hop, not the final destination.
     """
     
-    def __init__(self, identity: NodeIdentity, padder: Optional[MessagePadder] = None):
+    def __init__(
+        self,
+        identity: NodeIdentity,
+        padder: Optional[MessagePadder] = None,
+        peer_registry: Optional[Any] = None,
+    ):
         """
         Initialize onion router
         
         Args:
             identity: Node identity for encryption
             padder: Optional message padder
+            peer_registry: Optional peer registry for looking up peer public keys
         """
         self.identity = identity
         self.padder = padder or MessagePadder()
+        self.peer_registry = peer_registry
         self.routing_table: Dict[str, List[str]] = {}  # target -> [hop1, hop2, ...]
+        
+        # Initialize key exchange for this node
+        # We'll create ephemeral key exchanges for each hop
+        self._key_exchange = KeyExchange()
     
     def build_onion(
         self,
@@ -244,15 +257,46 @@ class OnionRouter:
                     "payload": current_payload.hex(),
                 }
             
-            # Encrypt this layer
-            # In production, would use shared secret with current_node
-            # For now, use a simplified encryption
+            # Encrypt this layer using key exchange with current_node
             layer_json = json.dumps(layer_data).encode('utf-8')
             
+            # Derive encryption key from current_node's public key using key exchange
+            encryption_key = None
+            if self.peer_registry:
+                peer = self.peer_registry.get_peer(current_node)
+                if peer and peer.public_key:
+                    try:
+                        # Derive a deterministic shared secret for this hop
+                        # Both sender and receiver can derive the same key using:
+                        # - The hop's public key (known to both)
+                        # - The sender's public key (included in message or known)
+                        # - The hop's node ID (for context)
+                        our_node_id = self.identity.get_node_id()
+                        our_public_key = self.identity.serialize_public_key()
+                        
+                        # Create shared input: both parties know hop's public key and node ID
+                        # Sender uses: hop_public_key + sender_public_key + hop_node_id
+                        # Receiver uses: hop_public_key + sender_public_key + hop_node_id (same!)
+                        shared_input = peer.public_key + our_public_key + current_node.encode('utf-8')
+                        
+                        hkdf = HKDF(
+                            algorithm=hashes.SHA256(),
+                            length=32,
+                            salt=b'project-dawn-onion-v1',
+                            info=b'onion-layer-encryption',
+                            backend=default_backend()
+                        )
+                        encryption_key = hkdf.derive(shared_input)
+                    except Exception as e:
+                        logger.warning(f"Failed to derive key for {current_node[:16]}...: {e}")
+            
+            # Fallback to random key if key derivation failed
+            if not encryption_key:
+                logger.warning(f"Using random key for {current_node[:16]}... (peer not in registry or key derivation failed)")
+                encryption_key = os.urandom(32)
+            
             # Use AES-GCM for layer encryption
-            # In production, would derive key from node's public key
-            key = os.urandom(32)  # Simplified - would use key exchange
-            aesgcm = AESGCM(key)
+            aesgcm = AESGCM(encryption_key)
             nonce = os.urandom(12)
             encrypted_layer = aesgcm.encrypt(nonce, layer_json, None)
             
@@ -282,11 +326,50 @@ class OnionRouter:
             encrypted = bytes.fromhex(layer_data["encrypted"])
             nonce = bytes.fromhex(layer_data["nonce"])
             
-            # Decrypt layer
-            # In production, would derive key from sender's public key
-            key = os.urandom(32)  # Simplified - would use key exchange
-            aesgcm = AESGCM(key)
-            decrypted = aesgcm.decrypt(nonce, encrypted, None)
+            # Decrypt layer using key derived from sender's public key
+            # Note: For onion routing, we (the current hop) decrypt using:
+            # - Our own public key (we are the hop)
+            # - Sender's public key (from peer registry)
+            # - Our node ID (we are the current hop)
+            decryption_key = None
+            if self.peer_registry:
+                sender_peer = self.peer_registry.get_peer(sender_node_id)
+                if sender_peer and sender_peer.public_key:
+                    try:
+                        # Derive the same key that was used for encryption
+                        # Sender used: our_public_key + sender_public_key + our_node_id
+                        # We use: our_public_key + sender_public_key + our_node_id (same!)
+                        our_node_id = self.identity.get_node_id()
+                        our_public_key = self.identity.serialize_public_key()
+                        
+                        # Match the derivation used by sender
+                        # The sender encrypted this layer for us (current hop) using:
+                        # HKDF(our_public_key + sender_public_key + our_node_id)
+                        shared_input = our_public_key + sender_peer.public_key + our_node_id.encode('utf-8')
+                        
+                        hkdf = HKDF(
+                            algorithm=hashes.SHA256(),
+                            length=32,
+                            salt=b'project-dawn-onion-v1',
+                            info=b'onion-layer-encryption',
+                            backend=default_backend()
+                        )
+                        decryption_key = hkdf.derive(shared_input)
+                    except Exception as e:
+                        logger.warning(f"Failed to derive decryption key for {sender_node_id[:16]}...: {e}")
+            
+            # Fallback to random key if key derivation failed (will fail to decrypt)
+            if not decryption_key:
+                logger.warning(f"Using random key for decryption (will fail) - peer {sender_node_id[:16]}... not in registry")
+                decryption_key = os.urandom(32)
+            
+            # Use AES-GCM for layer decryption
+            aesgcm = AESGCM(decryption_key)
+            try:
+                decrypted = aesgcm.decrypt(nonce, encrypted, None)
+            except Exception as e:
+                logger.error(f"Failed to decrypt onion layer from {sender_node_id[:16]}...: {e}")
+                return (None, None)
             
             # Parse decrypted layer
             layer_info = json.loads(decrypted.decode('utf-8'))
@@ -351,6 +434,7 @@ class PrivacyLayer:
         enable_onion: bool = True,
         enable_padding: bool = True,
         enable_timing_obfuscation: bool = True,
+        peer_registry: Optional[Any] = None,
     ):
         """
         Initialize privacy layer
@@ -360,6 +444,7 @@ class PrivacyLayer:
             enable_onion: Enable onion routing
             enable_padding: Enable message padding
             enable_timing_obfuscation: Enable timing obfuscation
+            peer_registry: Optional peer registry for key exchange in onion routing
         """
         self.identity = identity
         self.enable_onion = enable_onion
@@ -367,7 +452,7 @@ class PrivacyLayer:
         self.enable_timing_obfuscation = enable_timing_obfuscation
         
         self.padder = MessagePadder() if enable_padding else None
-        self.onion_router = OnionRouter(identity, self.padder) if enable_onion else None
+        self.onion_router = OnionRouter(identity, self.padder, peer_registry) if enable_onion else None
         self.timing_obfuscator = TimingObfuscator() if enable_timing_obfuscation else None
     
     async def send_private_message(

@@ -69,7 +69,26 @@ class BaseAgent:
         }
     
     async def initialize(self) -> None:
-        """Initialize agent (override in subclasses)"""
+        """
+        Initialize agent (override in subclasses)
+        
+        This method is called automatically by `start()`. Override this method
+        in subclasses to perform agent-specific initialization, such as:
+        - Loading configuration or state
+        - Registering tools, resources, or prompts
+        - Setting up connections or dependencies
+        - Pre-computing values or indices
+        
+        The default implementation does nothing and should be overridden by subclasses
+        that need initialization logic. This follows the template method pattern.
+        
+        Example:
+            async def initialize(self) -> None:
+                await self.load_config()
+                self.register_tool("my_tool", "Description", self._my_tool_handler)
+        """
+        # Default implementation: no-op
+        # Subclasses should override this method for agent-specific initialization
         pass
     
     async def start(self) -> None:

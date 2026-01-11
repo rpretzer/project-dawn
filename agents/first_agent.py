@@ -1167,7 +1167,7 @@ class FirstAgent(BaseAgent):
     
     async def _search_semantic(self, query: str, threshold: float = 0.5, limit: int = 10) -> Dict[str, Any]:
         """
-        Semantic search using simplified keyword-based similarity
+        Semantic search using improved similarity algorithms
         
         Args:
             query: Search query
@@ -1178,7 +1178,9 @@ class FirstAgent(BaseAgent):
             Similar content ranked by relevance
         """
         query_lower = query.lower()
-        query_words = set(query_lower.split())
+        # Tokenize query (split on whitespace and punctuation)
+        import re
+        query_tokens = set(re.findall(r'\b\w+\b', query_lower))
         results = []
         
         # Record search in history
@@ -1191,15 +1193,77 @@ class FirstAgent(BaseAgent):
         if len(self.search_history) > 100:
             self.search_history = self.search_history[-100:]
         
+        # Calculate TF-IDF weights for query terms
+        # Build document frequency
+        doc_freq = {}
+        total_docs = len(self.search_index)
+        for content_id, indexed in self.search_index.items():
+            content_lower = indexed["content"].lower()
+            content_tokens = set(re.findall(r'\b\w+\b', content_lower))
+            for token in content_tokens:
+                doc_freq[token] = doc_freq.get(token, 0) + 1
+        
+        # Calculate query term frequencies
+        query_tf = {}
+        for token in query_tokens:
+            query_tf[token] = query_tf.get(token, 0) + 1
+        
         # Calculate similarity for each indexed content
         for content_id, indexed in self.search_index.items():
             content_lower = indexed["content"].lower()
-            content_words = set(content_lower.split())
+            content_tokens = set(re.findall(r'\b\w+\b', content_lower))
             
-            # Simple Jaccard similarity (intersection over union)
-            intersection = len(query_words & content_words)
-            union = len(query_words | content_words)
-            similarity = intersection / union if union > 0 else 0.0
+            # Calculate multiple similarity metrics
+            # 1. Jaccard similarity (intersection over union)
+            intersection = len(query_tokens & content_tokens)
+            union = len(query_tokens | content_tokens)
+            jaccard = intersection / union if union > 0 else 0.0
+            
+            # 2. Cosine similarity (TF-IDF based)
+            # Build term frequency for this document
+            doc_tf = {}
+            for token in re.findall(r'\b\w+\b', content_lower):
+                doc_tf[token] = doc_tf.get(token, 0) + 1
+            
+            # Calculate TF-IDF vectors
+            query_vector = []
+            doc_vector = []
+            all_terms = query_tokens | content_tokens
+            
+            dot_product = 0.0
+            query_norm = 0.0
+            doc_norm = 0.0
+            
+            for term in all_terms:
+                # Query TF-IDF
+                query_tf_val = query_tf.get(term, 0)
+                idf = 1.0 + (total_docs / (doc_freq.get(term, 1) + 1)) if doc_freq.get(term, 0) > 0 else 0.1
+                query_tfidf = query_tf_val * idf
+                
+                # Document TF-IDF
+                doc_tf_val = doc_tf.get(term, 0)
+                doc_tfidf = doc_tf_val * idf
+                
+                dot_product += query_tfidf * doc_tfidf
+                query_norm += query_tfidf ** 2
+                doc_norm += doc_tfidf ** 2
+            
+            # Cosine similarity
+            cosine = dot_product / ((query_norm ** 0.5) * (doc_norm ** 0.5) + 1e-10)
+            
+            # 3. Dice coefficient (2 * intersection / sum of sizes)
+            dice = 2 * intersection / (len(query_tokens) + len(content_tokens)) if (query_tokens or content_tokens) else 0.0
+            
+            # 4. Overlap coefficient (intersection / min size)
+            overlap = intersection / min(len(query_tokens), len(content_tokens)) if min(len(query_tokens), len(content_tokens)) > 0 else 0.0
+            
+            # Combined similarity score (weighted average)
+            similarity = (
+                0.4 * cosine +      # TF-IDF cosine (most important)
+                0.3 * jaccard +     # Jaccard
+                0.2 * dice +        # Dice
+                0.1 * overlap       # Overlap
+            )
             
             if similarity >= threshold:
                 # Create snippet
@@ -1842,44 +1906,239 @@ class FirstAgent(BaseAgent):
         if db_name not in self.in_memory_dbs:
             self.in_memory_dbs[db_name] = defaultdict(list)
         
-        # Simple query execution for in-memory database
-        # This is a simplified implementation - in production would use actual SQL
+        # Query execution for in-memory database
+        # Supports basic SQL operations: SELECT, INSERT, CREATE TABLE, UPDATE, DELETE
         query_lower = query.lower().strip()
         results = []
         
         if query_lower.startswith("select"):
-            # Simple SELECT query parsing
-            # Extract table name (simplified)
+            # Parse SELECT query
             if "from" in query_lower:
-                parts = query_lower.split("from")
-                if len(parts) > 1:
-                    table_name = parts[1].split()[0].strip()
-                    if table_name in self.in_memory_dbs[db_name]:
-                        results = self.in_memory_dbs[db_name][table_name][:]
-                        # Apply WHERE clause if present (simplified)
-                        if "where" in query_lower:
-                            # Very basic WHERE filtering
-                            where_part = query_lower.split("where")[1] if "where" in query_lower else ""
-                            # This is a simplified implementation
+                # Split into SELECT and FROM parts
+                from_idx = query_lower.find("from")
+                select_part = query_lower[:from_idx].replace("select", "").strip()
+                from_part = query_lower[from_idx + 4:].strip()  # Skip "from"
+                
+                # Extract table name (handle potential JOIN, WHERE, etc.)
+                table_name = from_part.split()[0].strip()
+                # Remove table alias if present
+                if " as " in table_name:
+                    table_name = table_name.split(" as ")[0].strip()
+                elif " " in table_name and not table_name.startswith("("):
+                    # Simple case: just table name
+                    table_name = table_name.split()[0]
+                
+                if table_name in self.in_memory_dbs[db_name]:
+                    results = self.in_memory_dbs[db_name][table_name][:]
+                    
+                    # Apply WHERE clause if present
+                    if "where" in query_lower:
+                        where_idx = query_lower.find("where")
+                        where_part = query_lower[where_idx + 5:].strip()  # Skip "where"
+                        # Remove ORDER BY, LIMIT, etc. from WHERE clause
+                        for keyword in ["order by", "group by", "limit", "having"]:
+                            if keyword in where_part:
+                                where_part = where_part[:where_part.find(keyword)].strip()
+                        
+                        # Parse WHERE conditions (supports AND, OR, =, !=, <, >, <=, >=, LIKE, IN)
+                        filtered_results = []
+                        for record in results:
+                            if self._evaluate_where_condition(where_part, record, params):
+                                filtered_results.append(record)
+                        results = filtered_results
+                    
+                    # Apply column selection (SELECT specific columns)
+                    if select_part != "*" and "," in select_part:
+                        columns = [col.strip() for col in select_part.split(",")]
+                        selected_results = []
+                        for record in results:
+                            selected_record = {}
+                            for col in columns:
+                                # Handle column aliases
+                                if " as " in col:
+                                    col_name, alias = col.split(" as ")
+                                    selected_record[alias.strip()] = record.get(col_name.strip(), None)
+                                else:
+                                    selected_record[col.strip()] = record.get(col.strip(), None)
+                            selected_results.append(selected_record)
+                        results = selected_results
+                    elif select_part != "*":
+                        # Single column
+                        col_name = select_part.strip()
+                        selected_results = []
+                        for record in results:
+                            selected_results.append({col_name: record.get(col_name, None)})
+                        results = selected_results
+                    
+                    # Apply ORDER BY if present
+                    if "order by" in query_lower:
+                        order_idx = query_lower.find("order by")
+                        order_part = query_lower[order_idx + 8:].strip()  # Skip "order by"
+                        if "limit" in order_part:
+                            order_part = order_part[:order_part.find("limit")].strip()
+                        
+                        # Parse ORDER BY (supports ASC/DESC)
+                        desc = "desc" in order_part.lower()
+                        order_col = order_part.replace("asc", "").replace("desc", "").strip().split()[0]
+                        results.sort(key=lambda x: self._get_field_value(x, order_col), reverse=desc)
+                    
+                    # Apply LIMIT if present
+                    if "limit" in query_lower:
+                        limit_idx = query_lower.find("limit")
+                        limit_part = query_lower[limit_idx + 5:].strip()
+                        try:
+                            limit_num = int(limit_part.split()[0])
+                            results = results[:limit_num]
+                        except ValueError:
                             pass
         elif query_lower.startswith("insert"):
-            # Simple INSERT query
+            # Parse INSERT query
             if "into" in query_lower:
-                parts = query_lower.split("into")
-                if len(parts) > 1:
-                    table_name = parts[1].split()[0].strip()
-                    # Create a simple record
-                    record = {"id": str(uuid.uuid4()), "data": params}
-                    self.in_memory_dbs[db_name][table_name].append(record)
-                    results = [{"inserted": True, "id": record["id"]}]
-        elif query_lower.startswith("create table"):
-            # Simple CREATE TABLE
-            if "table" in query_lower:
-                parts = query_lower.split("table")
-                if len(parts) > 1:
-                    table_name = parts[1].split()[0].strip()
+                into_idx = query_lower.find("into")
+                table_part = query_lower[into_idx + 4:].strip()  # Skip "into"
+                table_name = table_part.split()[0].strip()
+                
+                # Initialize table if it doesn't exist
+                if table_name not in self.in_memory_dbs[db_name]:
                     self.in_memory_dbs[db_name][table_name] = []
-                    results = [{"created": True, "table": table_name}]
+                
+                # Parse VALUES or use params
+                record = {"id": str(uuid.uuid4())}
+                if params:
+                    # Use provided params
+                    record.update(params)
+                elif "values" in query_lower or "(" in table_part:
+                    # Try to parse VALUES clause
+                    if "values" in query_lower:
+                        values_idx = query_lower.find("values")
+                        values_part = query_lower[values_idx + 6:].strip()
+                        # Extract column names if specified
+                        if "(" in table_part and ")" in table_part:
+                            cols_start = table_part.find("(")
+                            cols_end = table_part.find(")")
+                            cols_str = table_part[cols_start + 1:cols_end]
+                            columns = [col.strip() for col in cols_str.split(",")]
+                        else:
+                            columns = None
+                        
+                        # Parse VALUES
+                        if "(" in values_part:
+                            vals_start = values_part.find("(")
+                            vals_end = values_part.find(")")
+                            vals_str = values_part[vals_start + 1:vals_end]
+                            values = [v.strip().strip("'\"") for v in vals_str.split(",")]
+                            
+                            if columns:
+                                for col, val in zip(columns, values):
+                                    # Try to convert to number if possible
+                                    try:
+                                        if "." in val:
+                                            record[col] = float(val)
+                                        else:
+                                            record[col] = int(val)
+                                    except ValueError:
+                                        record[col] = val
+                            else:
+                                # No column names, use positional
+                                for i, val in enumerate(values):
+                                    try:
+                                        if "." in val:
+                                            record[f"col{i}"] = float(val)
+                                        else:
+                                            record[f"col{i}"] = int(val)
+                                    except ValueError:
+                                        record[f"col{i}"] = val
+                    else:
+                        # No VALUES, use params or create empty record
+                        record.update(params)
+                
+                self.in_memory_dbs[db_name][table_name].append(record)
+                results = [{"inserted": True, "id": record["id"], "record": record}]
+        
+        elif query_lower.startswith("update"):
+            # Parse UPDATE query
+            update_idx = query_lower.find("update")
+            set_idx = query_lower.find("set")
+            where_idx = query_lower.find("where")
+            
+            if set_idx > 0:
+                table_name = query_lower[update_idx + 6:set_idx].strip()
+                set_part = query_lower[set_idx + 3:where_idx if where_idx > 0 else None].strip()
+                
+                if table_name in self.in_memory_dbs[db_name]:
+                    updated_count = 0
+                    for record in self.in_memory_dbs[db_name][table_name]:
+                        # Apply WHERE condition if present
+                        if where_idx > 0:
+                            where_part = query_lower[where_idx + 5:].strip()
+                            if not self._evaluate_where_condition(where_part, record, params):
+                                continue
+                        
+                        # Apply SET clause
+                        assignments = [a.strip() for a in set_part.split(",")]
+                        for assignment in assignments:
+                            if "=" in assignment:
+                                col, val = assignment.split("=", 1)
+                                col = col.strip()
+                                val = val.strip().strip("'\"")
+                                # Try to convert to number
+                                try:
+                                    if "." in val:
+                                        record[col] = float(val)
+                                    else:
+                                        record[col] = int(val)
+                                except ValueError:
+                                    record[col] = val
+                            updated_count += 1
+                    
+                    results = [{"updated": True, "count": updated_count}]
+        
+        elif query_lower.startswith("delete"):
+            # Parse DELETE query
+            if "from" in query_lower:
+                from_idx = query_lower.find("from")
+                table_name = query_lower[from_idx + 4:].strip().split()[0]
+                
+                if table_name in self.in_memory_dbs[db_name]:
+                    deleted_count = 0
+                    if "where" in query_lower:
+                        where_idx = query_lower.find("where")
+                        where_part = query_lower[where_idx + 5:].strip()
+                        # Filter and delete
+                        self.in_memory_dbs[db_name][table_name] = [
+                            r for r in self.in_memory_dbs[db_name][table_name]
+                            if not self._evaluate_where_condition(where_part, r, params)
+                        ]
+                        deleted_count = len([r for r in self.in_memory_dbs[db_name][table_name]
+                                            if self._evaluate_where_condition(where_part, r, params)])
+                    else:
+                        # Delete all
+                        deleted_count = len(self.in_memory_dbs[db_name][table_name])
+                        self.in_memory_dbs[db_name][table_name] = []
+                    
+                    results = [{"deleted": True, "count": deleted_count}]
+        
+        elif query_lower.startswith("create table"):
+            # Parse CREATE TABLE query
+            table_idx = query_lower.find("table")
+            if table_idx > 0:
+                table_part = query_lower[table_idx + 5:].strip()
+                table_name = table_part.split()[0].strip()
+                
+                # Initialize empty table
+                if table_name not in self.in_memory_dbs[db_name]:
+                    self.in_memory_dbs[db_name][table_name] = []
+                
+                results = [{"created": True, "table": table_name}]
+        
+        elif query_lower.startswith("drop table"):
+            # Parse DROP TABLE query
+            table_idx = query_lower.find("table")
+            if table_idx > 0:
+                table_name = query_lower[table_idx + 5:].strip().split()[0]
+                if table_name in self.in_memory_dbs[db_name]:
+                    del self.in_memory_dbs[db_name][table_name]
+                    results = [{"dropped": True, "table": table_name}]
         
         logger.info(f"Agent '{self.name}' executed query on database '{db_name}'")
         return {
@@ -1889,6 +2148,139 @@ class FirstAgent(BaseAgent):
             "results": results,
             "count": len(results),
         }
+    
+    def _evaluate_where_condition(self, where_clause: str, record: Dict[str, Any], params: Dict[str, Any]) -> bool:
+        """
+        Evaluate WHERE clause condition against a record
+        
+        Args:
+            where_clause: WHERE clause string
+            record: Record to evaluate
+            params: Query parameters
+            
+        Returns:
+            True if condition matches, False otherwise
+        """
+        if not where_clause.strip():
+            return True
+        
+        # Split by AND/OR (basic support)
+        and_parts = where_clause.split(" and ")
+        or_results = []
+        
+        for and_part in and_parts:
+            or_parts = and_part.split(" or ")
+            and_results = []
+            
+            for condition in or_parts:
+                condition = condition.strip()
+                if not condition:
+                    continue
+                
+                # Parse operators: =, !=, <, >, <=, >=, LIKE, IN
+                result = False
+                if "!=" in condition or "<>" in condition:
+                    op = "!=" if "!=" in condition else "<>"
+                    col, val = condition.split(op, 1)
+                    col = col.strip()
+                    val = val.strip().strip("'\"")
+                    record_val = record.get(col, None)
+                    result = str(record_val) != val
+                elif ">=" in condition:
+                    col, val = condition.split(">=", 1)
+                    col = col.strip()
+                    val = val.strip().strip("'\"")
+                    record_val = self._get_field_value(record, col)
+                    try:
+                        result = float(record_val) >= float(val)
+                    except (ValueError, TypeError):
+                        result = str(record_val) >= val
+                elif "<=" in condition:
+                    col, val = condition.split("<=", 1)
+                    col = col.strip()
+                    val = val.strip().strip("'\"")
+                    record_val = self._get_field_value(record, col)
+                    try:
+                        result = float(record_val) <= float(val)
+                    except (ValueError, TypeError):
+                        result = str(record_val) <= val
+                elif ">" in condition and not condition.count(">") > 1:
+                    col, val = condition.split(">", 1)
+                    col = col.strip()
+                    val = val.strip().strip("'\"")
+                    record_val = self._get_field_value(record, col)
+                    try:
+                        result = float(record_val) > float(val)
+                    except (ValueError, TypeError):
+                        result = str(record_val) > val
+                elif "<" in condition and not condition.count("<") > 1:
+                    col, val = condition.split("<", 1)
+                    col = col.strip()
+                    val = val.strip().strip("'\"")
+                    record_val = self._get_field_value(record, col)
+                    try:
+                        result = float(record_val) < float(val)
+                    except (ValueError, TypeError):
+                        result = str(record_val) < val
+                elif " like " in condition.lower():
+                    parts = condition.lower().split(" like ", 1)
+                    col = parts[0].strip()
+                    pattern = parts[1].strip().strip("'\"")
+                    record_val = str(self._get_field_value(record, col)).lower()
+                    # Convert SQL LIKE pattern to regex (basic)
+                    regex_pattern = pattern.replace("%", ".*").replace("_", ".")
+                    import re
+                    result = bool(re.match(regex_pattern, record_val))
+                elif " in " in condition.lower():
+                    parts = condition.lower().split(" in ", 1)
+                    col = parts[0].strip()
+                    val_list = parts[1].strip().strip("()")
+                    values = [v.strip().strip("'\"") for v in val_list.split(",")]
+                    record_val = str(self._get_field_value(record, col))
+                    result = record_val in values
+                elif "=" in condition:
+                    col, val = condition.split("=", 1)
+                    col = col.strip()
+                    val = val.strip().strip("'\"")
+                    # Check params first
+                    if val.startswith(":") and val[1:] in params:
+                        val = str(params[val[1:]])
+                    record_val = self._get_field_value(record, col)
+                    result = str(record_val) == val
+                else:
+                    # Default: column exists and is truthy
+                    result = bool(record.get(condition.strip(), None))
+                
+                and_results.append(result)
+            
+            # OR logic: any condition true
+            or_result = any(and_results) if and_results else False
+            or_results.append(or_result)
+        
+        # AND logic: all parts must be true
+        return all(or_results) if or_results else True
+    
+    def _get_field_value(self, record: Dict[str, Any], field: str) -> Any:
+        """
+        Get field value from record, supporting nested fields with dot notation
+        
+        Args:
+            record: Record dictionary
+            field: Field name (supports dot notation for nested fields)
+            
+        Returns:
+            Field value or None
+        """
+        if "." in field:
+            parts = field.split(".")
+            value = record
+            for part in parts:
+                if isinstance(value, dict):
+                    value = value.get(part)
+                else:
+                    return None
+            return value
+        return record.get(field)
     
     async def _db_schema(
         self,

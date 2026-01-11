@@ -23,6 +23,7 @@ from .privacy import PrivacyLayer
 from consensus import DistributedAgentRegistry
 from llm.config import LLMConfig, load_config, save_config
 from llm.ollama import list_models_async, chat_async
+from security import TrustManager, PeerValidator, AuthManager, Permission, AuditLogger, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +83,14 @@ class P2PNode:
         # Distributed agent registry
         self.agent_registry = DistributedAgentRegistry(self.node_id)
         
-        # Peer registry and discovery
-        self.peer_registry = PeerRegistry()
+        # Security: Trust, authentication, and audit logging
+        self.audit_logger = AuditLogger()
+        self.trust_manager = TrustManager()
+        self.auth_manager = AuthManager()
+        self.peer_validator = PeerValidator(self.trust_manager, identity, self.audit_logger)
+        
+        # Peer registry and discovery (with validator)
+        self.peer_registry = PeerRegistry(peer_validator=self.peer_validator)
         self.discovery = PeerDiscovery(
             self.peer_registry,
             bootstrap_nodes=bootstrap_nodes,
@@ -121,14 +128,18 @@ class P2PNode:
             host: Server host
             port: Server port
         """
-        # Start encrypted WebSocket server
+        # Start encrypted WebSocket server (with trust manager for signature verification)
         self.server = EncryptedWebSocketServer(
             identity=self.identity,
             message_handler=self._handle_incoming_message,
             on_connect=self._on_client_connect,
             on_disconnect=self._on_client_disconnect,
             enable_encryption=self.enable_encryption,
+            peer_registry=self.peer_registry,
         )
+        # Inject trust manager and validator for signature verification
+        self.server.trust_manager = self.trust_manager
+        self.server.peer_validator = self.peer_validator
         
         # Start discovery
         await self.discovery.discover_bootstrap()
@@ -242,6 +253,18 @@ class P2PNode:
         Returns:
             True if connected successfully, False otherwise
         """
+        # Check if peer is trusted before connecting
+        if not self.peer_validator.can_connect(peer.node_id):
+            logger.warning(f"Cannot connect to untrusted peer: {peer.node_id[:16]}...")
+            self.audit_logger.log_event(
+                event_type=AuditEventType.CONNECTION_REJECTED,
+                node_id=self.node_id,
+                peer_node_id=peer.node_id,
+                success=False,
+                error="Peer not trusted",
+            )
+            return False
+        
         if peer.node_id in self.peer_connections:
             logger.debug(f"Already connected to peer: {peer.node_id[:16]}...")
             return True
@@ -367,6 +390,39 @@ class P2PNode:
             Response message or None
         """
         method = message.get("method", "")
+        
+        # Authorization check for peer messages
+        if sender_node_id and sender_node_id != self.node_id:
+            # Check if peer is trusted
+            if not self.peer_validator.can_connect(sender_node_id):
+                logger.warning(f"Rejected message from untrusted peer: {sender_node_id[:16]}...")
+                return {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "error": {
+                        "code": -32001,
+                        "message": "Unauthorized: peer not trusted",
+                    }
+                }
+            
+            # Check permissions for agent access
+            if ":" in method and "/" in method:
+                # Extract agent_id from method
+                parts = method.split("/", 1)
+                target = parts[0]
+                if ":" in target:
+                    _, agent_id = target.split(":", 1)
+                    # Check if peer has permission to access agents
+                    if not self.auth_manager.has_permission(sender_node_id, Permission.AGENT_EXECUTE):
+                        logger.warning(f"Rejected agent access from {sender_node_id[:16]}... (no permission)")
+                        return {
+                            "jsonrpc": "2.0",
+                            "id": message.get("id"),
+                            "error": {
+                                "code": -32001,
+                                "message": "Unauthorized: no permission to access agents",
+                            }
+                        }
         
         # Handle node-level methods
         if method.startswith("node/"):
