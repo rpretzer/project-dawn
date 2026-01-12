@@ -1,317 +1,270 @@
 # Configuration Guide
 
-Complete guide to configuring Project Dawn.
+Project Dawn uses a flexible configuration system that supports YAML files, environment variables, and programmatic configuration.
 
----
+## Configuration Sources
 
-## Configuration Methods
+Configuration is loaded in the following order (later sources override earlier ones):
 
-Project Dawn supports three configuration methods (in order of precedence):
-
-1. **Environment Variables** (highest precedence)
-2. **Configuration File** (`config.yaml`)
-3. **Default Values** (lowest precedence)
-
----
+1. Default values (hardcoded in `config/config.py`)
+2. `config/config.yaml` (if exists)
+3. `config/default.yaml` (fallback template)
+4. Environment variables
+5. Programmatic overrides
 
 ## Configuration File
 
-### Location
+Create `config/config.yaml` in the project root:
 
-Configuration file is located at:
-- Default: `~/.project-dawn/config.yaml`
-- Custom: `$PROJECT_DAWN_DATA_ROOT/config.yaml`
-
-### Format
-
-YAML format (requires PyYAML package):
 ```yaml
+# Node Configuration
 node:
-  identity_path: ~/.project-dawn/vault/node_identity.key
-  address: ws://0.0.0.0:8000
-  data_root: ~/.project-dawn
+  address: "ws://localhost:8000"
+  enable_encryption: true
+  enable_privacy: false
+  bootstrap_nodes: []
 
+# Security Configuration
 security:
-  trust_level_default: UNKNOWN
-  reject_unknown: false
-  audit_log_path: ~/.project-dawn/vault/audit.log
+  reject_unknown: false  # Reject connections from unknown peers
+  trust_default: "UNKNOWN"  # Default trust level for new peers
+  audit_log_enabled: true
 
+# Resilience Configuration
 resilience:
   rate_limit:
-    max_requests: 100
-    time_window: 60.0
+    max_requests: 100      # Max requests per time window
+    time_window: 60.0      # Time window in seconds
+    burst: 10              # Burst capacity
+  
   circuit_breaker:
-    failure_threshold: 5
-    timeout: 60.0
+    failure_threshold: 5   # Failures before opening circuit
+    timeout: 30.0          # Timeout before half-open
+    success_threshold: 2   # Successes to close circuit
+  
+  retry:
+    max_attempts: 3        # Maximum retry attempts
+    initial_delay: 1.0     # Initial delay in seconds
+    max_delay: 60.0        # Maximum delay in seconds
+    exponential_base: 2.0  # Exponential backoff base
 
+# Logging Configuration
 logging:
-  level: INFO
-  format: text
-  file: ~/.project-dawn/logs/dawn.log
+  level: "INFO"            # DEBUG, INFO, WARNING, ERROR
+  format: "json"           # json or text
+  file: null              # Log file path (null = stdout)
 
+# Observability Configuration
 observability:
+  metrics_enabled: true
   metrics_port: 9090
-  enable_tracing: false
+  health_check_enabled: true
+  health_check_port: 9090
 ```
-
----
-
-## Configuration Options
-
-### Node Configuration
-
-| Option | Environment Variable | Default | Description |
-|--------|---------------------|---------|-------------|
-| `identity_path` | - | `~/.project-dawn/vault/node_identity.key` | Path to node identity private key |
-| `address` | `PROJECT_DAWN_ADDRESS` | `ws://0.0.0.0:8000` | WebSocket server address |
-| `data_root` | `PROJECT_DAWN_DATA_ROOT` | `~/.project-dawn` | Data root directory |
-
-**Example:**
-```yaml
-node:
-  identity_path: /var/lib/project-dawn/vault/node_identity.key
-  address: ws://0.0.0.0:8000
-  data_root: /var/lib/project-dawn
-```
-
-### Security Configuration
-
-| Option | Environment Variable | Default | Description |
-|--------|---------------------|---------|-------------|
-| `trust_level_default` | `PROJECT_DAWN_TRUST_LEVEL` | `UNKNOWN` | Default trust level for new peers |
-| `reject_unknown` | `PROJECT_DAWN_REJECT_UNKNOWN` | `false` | Reject unknown peers (true/false) |
-| `audit_log_path` | - | `~/.project-dawn/vault/audit.log` | Path to audit log file |
-
-**Trust Levels:**
-- `UNTRUSTED`: Explicitly rejected
-- `UNKNOWN`: Not in whitelist (default)
-- `VERIFIED`: Verified via signature
-- `TRUSTED`: Whitelisted, trusted
-- `BOOTSTRAP`: Bootstrap node, highly trusted
-
-**Example:**
-```yaml
-security:
-  trust_level_default: UNKNOWN
-  reject_unknown: false  # Allow unknown peers
-  audit_log_path: /var/lib/project-dawn/vault/audit.log
-```
-
-### Resilience Configuration
-
-| Option | Environment Variable | Default | Description |
-|--------|---------------------|---------|-------------|
-| `rate_limit.max_requests` | `PROJECT_DAWN_RATE_LIMIT_MAX` | `100` | Max requests per time window |
-| `rate_limit.time_window` | `PROJECT_DAWN_RATE_LIMIT_WINDOW` | `60.0` | Time window in seconds |
-| `circuit_breaker.failure_threshold` | `PROJECT_DAWN_CB_THRESHOLD` | `5` | Failures before opening circuit |
-| `circuit_breaker.timeout` | `PROJECT_DAWN_CB_TIMEOUT` | `60.0` | Timeout before half-open attempt |
-
-**Example:**
-```yaml
-resilience:
-  rate_limit:
-    max_requests: 100
-    time_window: 60.0
-  circuit_breaker:
-    failure_threshold: 5
-    timeout: 60.0
-```
-
-### Logging Configuration
-
-| Option | Environment Variable | Default | Description |
-|--------|---------------------|---------|-------------|
-| `level` | `LOG_LEVEL` | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
-| `format` | `LOG_FORMAT` | `text` | Log format (text or json) |
-| `file` | `PROJECT_DAWN_LOG_FILE` | `~/.project-dawn/logs/dawn.log` | Log file path |
-
-**Log Levels:**
-- `DEBUG`: Detailed diagnostic information
-- `INFO`: General informational messages (default)
-- `WARNING`: Warning messages
-- `ERROR`: Error messages
-- `CRITICAL`: Critical errors
-
-**Log Formats:**
-- `text`: Human-readable text format
-- `json`: JSON format for log aggregation
-
-**Example:**
-```yaml
-logging:
-  level: INFO
-  format: json  # Use JSON for production
-  file: /var/log/project-dawn/dawn.log
-```
-
-### Observability Configuration
-
-| Option | Environment Variable | Default | Description |
-|--------|---------------------|---------|-------------|
-| `metrics_port` | `PROJECT_DAWN_METRICS_PORT` | `9090` | Port for metrics and health endpoints |
-| `enable_tracing` | `PROJECT_DAWN_ENABLE_TRACING` | `false` | Enable distributed tracing (future) |
-
-**Example:**
-```yaml
-observability:
-  metrics_port: 9090
-  enable_tracing: false
-```
-
----
 
 ## Environment Variables
 
-All configuration can be overridden via environment variables. Environment variables take precedence over configuration file.
+All configuration can be overridden with environment variables using the format:
 
-### Common Environment Variables
+```
+PROJECT_DAWN_<SECTION>_<KEY>=<value>
+```
+
+Examples:
 
 ```bash
-# Data and paths
-export PROJECT_DAWN_DATA_ROOT=/var/lib/project-dawn
-export PROJECT_DAWN_HOST=0.0.0.0
-export PROJECT_DAWN_WS_PORT=8000
-export PROJECT_DAWN_HTTP_PORT=8080
+# Node configuration
+export PROJECT_DAWN_NODE_ADDRESS="ws://0.0.0.0:8000"
+export PROJECT_DAWN_NODE_ENABLE_ENCRYPTION="true"
 
-# Security
-export PROJECT_DAWN_TRUST_LEVEL=UNKNOWN
-export PROJECT_DAWN_REJECT_UNKNOWN=false
+# Security configuration
+export PROJECT_DAWN_SECURITY_REJECT_UNKNOWN="true"
 
-# Logging
-export LOG_LEVEL=INFO
-export LOG_FORMAT=json
-export PROJECT_DAWN_LOG_FILE=/var/log/project-dawn/dawn.log
+# Logging configuration
+export LOG_LEVEL="DEBUG"
+export LOG_FORMAT="text"
 
-# Observability
-export PROJECT_DAWN_METRICS_PORT=9090
-export PROJECT_DAWN_ENABLE_TRACING=false
-
-# Resilience
-export PROJECT_DAWN_RATE_LIMIT_MAX=100
-export PROJECT_DAWN_RATE_LIMIT_WINDOW=60.0
-export PROJECT_DAWN_CB_THRESHOLD=5
-export PROJECT_DAWN_CB_TIMEOUT=60.0
+# Data root
+export PROJECT_DAWN_DATA_ROOT="/custom/data/path"
 ```
 
----
+## Configuration Sections
 
-## Configuration Loading
+### Node Configuration
 
-### Programmatic Usage
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `address` | string | `"ws://localhost:8000"` | Node WebSocket address |
+| `enable_encryption` | boolean | `true` | Enable message encryption |
+| `enable_privacy` | boolean | `false` | Enable privacy features (onion routing, etc.) |
+| `bootstrap_nodes` | list | `[]` | List of bootstrap node addresses |
+
+### Security Configuration
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `reject_unknown` | boolean | `false` | Reject connections from unknown peers |
+| `trust_default` | string | `"UNKNOWN"` | Default trust level (UNTRUSTED, UNKNOWN, VERIFIED, TRUSTED, BOOTSTRAP) |
+| `audit_log_enabled` | boolean | `true` | Enable security audit logging |
+
+### Resilience Configuration
+
+#### Rate Limiting
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_requests` | integer | `100` | Maximum requests per time window |
+| `time_window` | float | `60.0` | Time window in seconds |
+| `burst` | integer | `10` | Burst capacity |
+
+#### Circuit Breaker
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `failure_threshold` | integer | `5` | Number of failures before opening circuit |
+| `timeout` | float | `30.0` | Timeout in seconds before half-open |
+| `success_threshold` | integer | `2` | Number of successes to close circuit |
+
+#### Retry Policy
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `max_attempts` | integer | `3` | Maximum retry attempts |
+| `initial_delay` | float | `1.0` | Initial delay in seconds |
+| `max_delay` | float | `60.0` | Maximum delay in seconds |
+| `exponential_base` | float | `2.0` | Exponential backoff base |
+
+### Logging Configuration
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `level` | string | `"INFO"` | Log level (DEBUG, INFO, WARNING, ERROR) |
+| `format` | string | `"json"` | Log format (json, text) |
+| `file` | string/null | `null` | Log file path (null = stdout) |
+
+### Observability Configuration
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `metrics_enabled` | boolean | `true` | Enable Prometheus metrics |
+| `metrics_port` | integer | `9090` | Metrics HTTP server port |
+| `health_check_enabled` | boolean | `true` | Enable health check endpoints |
+| `health_check_port` | integer | `9090` | Health check HTTP server port |
+
+## Programmatic Configuration
+
+You can also configure Project Dawn programmatically:
 
 ```python
-from config import load_config, get_config
+from config import Config, load_config
 
-# Load from default location
+# Load configuration
 config = load_config()
 
-# Load from custom location
-from pathlib import Path
-config = load_config(Path("/etc/project-dawn/config.yaml"))
+# Override specific values
+config.node.address = "ws://0.0.0.0:8000"
+config.security.reject_unknown = True
 
-# Get global config
-config = get_config()
-
-# Access configuration
-print(config.node["address"])
-print(config.security["trust_level_default"])
-print(config.logging["level"])
+# Save configuration
+config.save("config/config.yaml")
 ```
 
-### Validation
+## Configuration Validation
 
-Configuration is automatically validated on load:
+Configuration is validated on load. Invalid values will raise `ValueError` with a descriptive error message.
 
-- Log levels validated (must be DEBUG, INFO, WARNING, ERROR, CRITICAL)
-- Log formats validated (must be text or json)
-- Trust levels validated (must be UNTRUSTED, UNKNOWN, VERIFIED, TRUSTED, BOOTSTRAP)
-- Ports validated (must be 1-65535)
+## Production Configuration
 
-Invalid values are replaced with defaults and warnings are logged.
+For production deployments, consider:
 
----
+1. **Security**:
+   ```yaml
+   security:
+     reject_unknown: true  # Only allow known peers
+     trust_default: "UNTRUSTED"
+   ```
 
-## Production Configuration Example
+2. **Resilience**:
+   ```yaml
+   resilience:
+     rate_limit:
+       max_requests: 1000  # Higher limit for production
+       time_window: 60.0
+     circuit_breaker:
+       failure_threshold: 10
+       timeout: 60.0
+   ```
+
+3. **Logging**:
+   ```yaml
+   logging:
+     level: "INFO"  # Don't use DEBUG in production
+     format: "json"  # Structured logging for log aggregation
+     file: "/var/log/project-dawn/app.log"
+   ```
+
+4. **Observability**:
+   ```yaml
+   observability:
+     metrics_enabled: true
+     metrics_port: 9090
+     health_check_enabled: true
+   ```
+
+## Configuration Examples
+
+### Development
 
 ```yaml
-# Production configuration
 node:
-  identity_path: /var/lib/project-dawn/vault/node_identity.key
-  address: ws://0.0.0.0:8000
-  data_root: /var/lib/project-dawn
+  address: "ws://localhost:8000"
+  enable_encryption: true
 
 security:
-  trust_level_default: UNKNOWN
-  reject_unknown: true  # Reject unknown peers in production
-  audit_log_path: /var/lib/project-dawn/vault/audit.log
+  reject_unknown: false
+
+logging:
+  level: "DEBUG"
+  format: "text"
+```
+
+### Production
+
+```yaml
+node:
+  address: "ws://0.0.0.0:8000"
+  enable_encryption: true
+  enable_privacy: true
+
+security:
+  reject_unknown: true
+  trust_default: "UNTRUSTED"
 
 resilience:
   rate_limit:
-    max_requests: 100
+    max_requests: 1000
     time_window: 60.0
-  circuit_breaker:
-    failure_threshold: 5
-    timeout: 60.0
 
 logging:
-  level: INFO  # Use INFO or WARNING, not DEBUG
-  format: json  # JSON format for log aggregation
-  file: /var/log/project-dawn/dawn.log
-
-observability:
-  metrics_port: 9090
-  enable_tracing: false
+  level: "INFO"
+  format: "json"
+  file: "/var/log/project-dawn/app.log"
 ```
-
----
-
-## Docker Configuration
-
-In Docker, use environment variables in `docker-compose.yml`:
-
-```yaml
-services:
-  dawn:
-    environment:
-      - PROJECT_DAWN_DATA_ROOT=/data
-      - LOG_LEVEL=INFO
-      - LOG_FORMAT=json
-      - PROJECT_DAWN_METRICS_PORT=9090
-      - PROJECT_DAWN_REJECT_UNKNOWN=true
-```
-
-Or mount a config file:
-
-```yaml
-services:
-  dawn:
-    volumes:
-      - ./config.yaml:/data/config.yaml
-    environment:
-      - PROJECT_DAWN_DATA_ROOT=/data
-```
-
----
-
-## Configuration Tips
-
-1. **Use environment variables for sensitive values**: Never put secrets in config files
-2. **Use JSON logging in production**: Easier to parse and aggregate
-3. **Set appropriate log levels**: Use INFO or WARNING in production, DEBUG only for troubleshooting
-4. **Configure trust policies**: Set `reject_unknown: true` in production
-5. **Monitor metrics port**: Restrict access to metrics endpoint (9090) to internal network
-6. **Validate configuration**: Always validate config file syntax before deployment
-
----
 
 ## Troubleshooting
 
-See [Troubleshooting Guide](troubleshooting.md) for configuration-related issues.
+### Configuration Not Loading
 
----
+- Check file path: `config/config.yaml` should be in project root
+- Verify YAML syntax is valid
+- Check file permissions
 
-## Additional Resources
+### Environment Variables Not Working
 
-- [Deployment Guide](deployment.md)
-- [Production Checklist](production-checklist.md)
-- [Default Configuration](../config/default.yaml)
+- Use format: `PROJECT_DAWN_<SECTION>_<KEY>`
+- Use uppercase and underscores
+- Restart the server after setting environment variables
+
+### Default Values
+
+If configuration file doesn't exist, default values from `config/default.yaml` are used. You can copy this file to `config/config.yaml` and customize it.
