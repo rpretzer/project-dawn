@@ -11,9 +11,12 @@ from .errors import (
     CircuitBreakerOpenError,
     RetryExhaustedError,
 )
-from .retry import RetryPolicy, exponential_backoff, retry_with_policy
+from .retry import RetryPolicy, exponential_backoff, retry_with_policy, retry_sync
 from .rate_limit import RateLimiter
 from .circuit_breaker import CircuitBreaker, CircuitState
+
+# Alias for convenience (retry_async is more intuitive name)
+retry_async = retry_with_policy
 
 __all__ = [
     "ResilienceError",
@@ -24,6 +27,8 @@ __all__ = [
     "RetryPolicy",
     "exponential_backoff",
     "retry_with_policy",
+    "retry_async",  # Alias for retry_with_policy
+    "retry_sync",
     "RateLimiter",
     "CircuitBreaker",
     "CircuitState",

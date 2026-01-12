@@ -20,17 +20,30 @@ class PeerValidator:
     Performs signature verification and trust checks.
     """
 
-    def __init__(self, trust_manager: TrustManager, local_identity: NodeIdentity):
+    def __init__(self, trust_manager: TrustManager, local_identity: NodeIdentity, audit_logger=None, config: Optional[Dict[str, Any]] = None):
         """
         Initialize peer validator
         
         Args:
             trust_manager: Trust manager instance
             local_identity: Local node identity
+            audit_logger: Audit logger (optional, for backward compatibility)
+            config: Security configuration (optional, will load from config if not provided)
         """
         self.trust_manager = trust_manager
         self.local_identity = local_identity
-        logger.debug("PeerValidator initialized")
+        self.audit_logger = audit_logger
+        
+        # Load config
+        if config is None:
+            try:
+                from config import get_config
+                config = get_config().security
+            except Exception:
+                config = {}
+        
+        self.reject_unknown = config.get("reject_unknown", False)
+        logger.debug(f"PeerValidator initialized (reject_unknown={self.reject_unknown})")
 
     def validate_peer_signature(
         self,
@@ -99,12 +112,20 @@ class PeerValidator:
             logger.warning(f"Rejecting connection from untrusted peer: {node_id[:16]}...")
             return False
         
+        # Reject unknown peers if configured
+        if self.reject_unknown and trust_level == TrustLevel.UNKNOWN:
+            logger.warning(f"Rejecting connection from unknown peer: {node_id[:16]}... (reject_unknown enabled)")
+            return False
+        
         # Allow trusted, verified, and bootstrap peers
         if trust_level in (TrustLevel.TRUSTED, TrustLevel.VERIFIED, TrustLevel.BOOTSTRAP):
             return True
         
-        # Unknown peers: allow but require verification
+        # Unknown peers: check reject_unknown config
         if trust_level == TrustLevel.UNKNOWN:
+            if self.reject_unknown:
+                logger.warning(f"Rejecting connection from unknown peer: {node_id[:16]}... (reject_unknown enabled)")
+                return False
             logger.info(f"Allowing connection from unknown peer (will require verification): {node_id[:16]}...")
             return True
         

@@ -1,0 +1,28 @@
+# Project Dawn - Default Configuration
+
+node:
+  identity_path: ~/.project-dawn/vault/node_identity.key
+  address: ws://0.0.0.0:8000
+  data_root: ~/.project-dawn
+
+security:
+  trust_level_default: UNKNOWN  # UNKNOWN, VERIFIED, TRUSTED, BOOTSTRAP
+  reject_unknown: false
+  audit_log_path: ~/.project-dawn/vault/audit.log
+
+resilience:
+  rate_limit:
+    max_requests: 100
+    time_window: 60.0
+  circuit_breaker:
+    failure_threshold: 5
+    timeout: 60.0
+
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  format: text  # text or json
+  file: ~/.project-dawn/logs/dawn.log
+
+observability:
+  metrics_port: 9090
+  enable_tracing: false

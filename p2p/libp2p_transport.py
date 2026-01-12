@@ -38,31 +38,31 @@ INetStream = Any
 try:
     if LIBP2P_ENABLED and PY_LIBP2P_AVAILABLE:
         # Try to import libp2p - if this works, we're good
-        import libp2p
-        from multiaddr import Multiaddr
+        import libp2p  # type: ignore[reportMissingImports]
+        from multiaddr import Multiaddr  # type: ignore[reportMissingImports]
         
         # Try to import specific types (may vary by version)
         try:
-            from libp2p.host.host_interface import IHost as Host
+            from libp2p.host.host_interface import IHost as Host  # type: ignore[reportMissingImports]
         except ImportError:
             try:
-                from libp2p.host import Host
+                from libp2p.host import Host  # type: ignore[reportMissingImports]
             except ImportError:
                 Host = Any
         
         try:
-            from libp2p.peer.id import ID as PeerID
+            from libp2p.peer.id import ID as PeerID  # type: ignore[reportMissingImports]
         except ImportError:
             try:
-                from libp2p.peer import PeerID
+                from libp2p.peer import PeerID  # type: ignore[reportMissingImports]
             except ImportError:
                 PeerID = Any
         
         try:
-            from libp2p.network.stream.net_stream_interface import INetStream
+            from libp2p.network.stream.net_stream_interface import INetStream  # type: ignore[reportMissingImports]
         except ImportError:
             try:
-                from libp2p.network.stream import INetStream
+                from libp2p.network.stream import INetStream  # type: ignore[reportMissingImports]
             except ImportError:
                 INetStream = Any
         
@@ -130,7 +130,7 @@ class Libp2pTransport:
         if not LIBP2P_AVAILABLE:
             # Check if it's a missing dependency issue
             try:
-                import libp2p
+                import libp2p  # type: ignore[reportMissingImports]
             except ImportError as e:
                 if "fastecdsa" in str(e).lower():
                     raise RuntimeError(
@@ -301,7 +301,7 @@ class Libp2pTransport:
         if not LIBP2P_AVAILABLE or self.host is None:
             return
         try:
-            from libp2p.discovery import mdns as libp2p_mdns
+            from libp2p.discovery import mdns as libp2p_mdns  # type: ignore[reportMissingImports]
             service_cls = getattr(libp2p_mdns, "MDNSService", None) or getattr(libp2p_mdns, "MDNSDiscovery", None)
             if not service_cls:
                 logger.warning("Libp2p mDNS discovery not available in this version")
@@ -318,7 +318,7 @@ class Libp2pTransport:
         if not LIBP2P_AVAILABLE or self.host is None:
             return
         try:
-            from libp2p.kademlia.dht import DHT
+            from libp2p.kademlia.dht import DHT  # type: ignore[reportMissingImports]
             self._dht = DHT(self.host)
             if hasattr(self._dht, "start"):
                 await self._dht.start()

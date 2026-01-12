@@ -15,11 +15,16 @@ from pathlib import Path
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from threading import Thread
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Setup logging (structured logging with JSON option)
+try:
+    from logging_config import setup_logging
+    setup_logging()
+except ImportError:
+    # Fallback to basic logging if module not available
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
 logger = logging.getLogger(__name__)
 
 # Import P2P components
@@ -28,6 +33,9 @@ from data_paths import data_root
 from orchestrator import Orchestrator
 from p2p import P2PNode
 from agents import FirstAgent
+from server_api import APIServer
+from health import HealthChecker
+from metrics import register_metrics
 
 # Frontend directory
 FRONTEND_DIR = Path(__file__).parent / "frontend"
@@ -153,9 +161,35 @@ async def main():
     web_server = WebServer(host=host, port=http_port, ws_url=f"ws://{host}:{ws_port}")
     web_server.start()
     
+    # Initialize metrics
+    metrics_collector = register_metrics()
+    
+    # Initialize health checker
+    health_checker = HealthChecker()
+    
+    # Register health checks for node (after node is started)
+    async def check_peers():
+        from health import HealthCheckResult
+        import time
+        peer_count = len(node.peer_connections) if hasattr(node, 'peer_connections') else 0
+        return HealthCheckResult(
+            status=HealthStatus.HEALTHY if peer_count >= 0 else HealthStatus.DEGRADED,
+            message=f"{peer_count} peers connected",
+            details={"peer_count": peer_count},
+            timestamp=time.time(),
+        )
+    
+    health_checker.register_check("peers", check_peers)
+    
+    # Start API server for metrics and health checks
+    metrics_port = int(os.getenv("PROJECT_DAWN_METRICS_PORT", "9090"))
+    api_server = APIServer(host=host, port=metrics_port, node=node, health_checker=health_checker)
+    api_server.start()
+    
     # Start P2P node
     logger.info(f"Starting P2P Node WebSocket server on ws://{host}:{ws_port}")
     logger.info(f"Frontend available at http://{host}:{http_port}")
+    logger.info(f"Metrics and health checks available at http://{host}:{metrics_port}")
     orchestrator_task = None
     orchestrator = None
 
@@ -182,6 +216,7 @@ async def main():
             orchestrator.stop()
         if orchestrator_task:
             await orchestrator_task
+        api_server.stop()
         web_server.stop()
         await node.stop()
         logger.info("Project Dawn V2 stopped")

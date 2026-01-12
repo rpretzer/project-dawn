@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  dawn:
+    build: .
+    container_name: project-dawn
+    ports:
+      - "8000:8000"  # WebSocket
+      - "8080:8080"  # Frontend
+      - "9090:9090"  # Metrics/Health
+    volumes:
+      - ./data:/data
+    environment:
+      - PROJECT_DAWN_DATA_ROOT=/data
+      - PROJECT_DAWN_HOST=0.0.0.0
+      - PROJECT_DAWN_WS_PORT=8000
+      - PROJECT_DAWN_HTTP_PORT=8080
+      - PROJECT_DAWN_METRICS_PORT=9090
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

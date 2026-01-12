@@ -25,6 +25,14 @@ except ImportError:
     WEBSOCKETS_AVAILABLE = False
     logger.warning("websockets library not available. Encrypted transport disabled.")
 
+# Try to import resilience components for retry policies
+try:
+    from resilience import RetryPolicy, retry_async
+    from resilience.errors import NetworkError, RetryExhaustedError
+    RESILIENCE_AVAILABLE = True
+except ImportError:
+    RESILIENCE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,9 +93,37 @@ class EncryptedWebSocketTransport:
         logger.info(f"Connecting to {self.url}...")
         
         try:
-            self.websocket = await websockets.connect(self.url)
-            self.connection_state = ConnectionState.CONNECTED
-            logger.info(f"Connected to {self.url}")
+            # Use retry policy if available
+            if RESILIENCE_AVAILABLE:
+                retry_policy = RetryPolicy(
+                    max_attempts=3,
+                    initial_delay=1.0,
+                    max_delay=10.0,
+                    retryable_errors=(ConnectionError, TimeoutError, OSError),
+                )
+                
+                async def _do_connect():
+                    self.websocket = await websockets.connect(self.url)
+                    self.connection_state = ConnectionState.CONNECTED
+                    logger.info(f"Connected to {self.url}")
+                
+                try:
+                    await retry_async(
+                        _do_connect,
+                        retry_policy,
+                        operation_name="connect",
+                    )
+                except RetryExhaustedError as e:
+                    self.connection_state = ConnectionState.ERROR
+                    raise NetworkError(
+                        f"Connection failed after {retry_policy.max_attempts} attempts",
+                        original_error=e,
+                    ) from e
+            else:
+                # Fallback without retry policy
+                self.websocket = await websockets.connect(self.url)
+                self.connection_state = ConnectionState.CONNECTED
+                logger.info(f"Connected to {self.url}")
             
             if self.enable_encryption:
                 await self._establish_session()
@@ -98,6 +134,9 @@ class EncryptedWebSocketTransport:
             # Start receiving messages
             self._receive_task = asyncio.create_task(self._receive_loop())
         
+        except NetworkError:
+            # Re-raise network errors
+            raise
         except Exception as e:
             logger.error(f"Connection error: {e}")
             self.connection_state = ConnectionState.ERROR

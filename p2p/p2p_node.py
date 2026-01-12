@@ -24,6 +24,10 @@ from consensus import DistributedAgentRegistry
 from llm.config import LLMConfig, load_config, save_config
 from llm.ollama import list_models_async, chat_async
 from security import TrustManager, PeerValidator, AuthManager, Permission, AuditLogger, AuditEventType
+from metrics import register_metrics, get_metrics_collector
+from resilience.rate_limit import RateLimiter, RateLimitConfig
+from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
+from resilience.errors import RateLimitError, CircuitBreakerOpenError, NetworkError
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +92,9 @@ class P2PNode:
         self.trust_manager = TrustManager()
         self.auth_manager = AuthManager()
         self.peer_validator = PeerValidator(self.trust_manager, identity, self.audit_logger)
+        
+        # Metrics: Prometheus metrics collection
+        self.metrics = register_metrics()
         
         # Peer registry and discovery (with validator)
         self.peer_registry = PeerRegistry(peer_validator=self.peer_validator)
@@ -287,6 +294,10 @@ class P2PNode:
             
             logger.info(f"Connected to peer: {peer.node_id[:16]}... ({peer.address})")
             
+            # Record metrics
+            self.metrics.record_peer_connection("success")
+            self.metrics.update_peer_count(len(self.peer_connections))
+            
             if self.on_peer_connected:
                 self.on_peer_connected(peer)
             
@@ -295,9 +306,23 @@ class P2PNode:
             
             return True
         
+        except CircuitBreakerOpenError as e:
+            logger.warning(f"Circuit breaker open for {peer.node_id[:16]}...: {e}")
+            peer.record_connection_failure()
+            self.metrics.record_peer_connection("failure")
+            self.metrics.record_error("CircuitBreakerOpenError", "p2p_node")
+            return False
+        except (NetworkError, ConnectionError, TimeoutError) as e:
+            logger.error(f"Network error connecting to peer {peer.node_id[:16]}...: {e}")
+            peer.record_connection_failure()
+            self.metrics.record_peer_connection("failure")
+            self.metrics.record_error("NetworkError", "p2p_node")
+            return False
         except Exception as e:
             logger.error(f"Failed to connect to peer {peer.node_id[:16]}...: {e}")
             peer.record_connection_failure()
+            self.metrics.record_peer_connection("failure")
+            self.metrics.record_error("ConnectionError", "p2p_node")
             return False
     
     async def disconnect_from_peer(self, node_id: str) -> None:
@@ -389,50 +414,78 @@ class P2PNode:
         Returns:
             Response message or None
         """
+        import time
+        start_time = time.time()
         method = message.get("method", "")
+        message_type = "request" if "id" in message else "notification"
+        message_size = len(str(message).encode('utf-8'))
         
-        # Authorization check for peer messages
-        if sender_node_id and sender_node_id != self.node_id:
-            # Check if peer is trusted
-            if not self.peer_validator.can_connect(sender_node_id):
-                logger.warning(f"Rejected message from untrusted peer: {sender_node_id[:16]}...")
-                return {
-                    "jsonrpc": "2.0",
-                    "id": message.get("id"),
-                    "error": {
-                        "code": -32001,
-                        "message": "Unauthorized: peer not trusted",
-                    }
-                }
-            
-            # Check permissions for agent access
-            if ":" in method and "/" in method:
-                # Extract agent_id from method
-                parts = method.split("/", 1)
-                target = parts[0]
-                if ":" in target:
-                    _, agent_id = target.split(":", 1)
-                    # Check if peer has permission to access agents
-                    if not self.auth_manager.has_permission(sender_node_id, Permission.AGENT_EXECUTE):
-                        logger.warning(f"Rejected agent access from {sender_node_id[:16]}... (no permission)")
-                        return {
-                            "jsonrpc": "2.0",
-                            "id": message.get("id"),
-                            "error": {
-                                "code": -32001,
-                                "message": "Unauthorized: no permission to access agents",
-                            }
+        try:
+            # Authorization check for peer messages
+            if sender_node_id and sender_node_id != self.node_id:
+                # Check if peer is trusted
+                if not self.peer_validator.can_connect(sender_node_id):
+                    logger.warning(f"Rejected message from untrusted peer: {sender_node_id[:16]}...")
+                    self.metrics.record_error("AuthorizationError", "message_routing")
+                    
+                    result = {
+                        "jsonrpc": "2.0",
+                        "id": message.get("id"),
+                        "error": {
+                            "code": -32001,
+                            "message": "Unauthorized: peer not trusted",
                         }
-        
-        # Handle node-level methods
-        if method.startswith("node/"):
-            return await self._handle_node_method(method, message.get("params", {}))
-        
-        # Handle agent methods (format: node_id:agent_id/method)
-        if ":" in method and "/" in method:
-            parts = method.split("/", 1)
-            target = parts[0]  # e.g., "node_id:agent_id"
-            agent_method = parts[1]  # e.g., "tools/list" or "chat/message"
+                    }
+                    
+                    # Record metrics
+                    latency = time.time() - start_time
+                    self.metrics.record_message(message_type, "error", latency, message_size)
+                    
+                    return result
+                
+                # Check permissions for agent access
+                if ":" in method and "/" in method:
+                    # Extract agent_id from method
+                    parts = method.split("/", 1)
+                    target = parts[0]
+                    if ":" in target:
+                        _, agent_id = target.split(":", 1)
+                        # Check if peer has permission to access agents
+                        if not self.auth_manager.has_permission(sender_node_id, Permission.AGENT_EXECUTE):
+                            logger.warning(f"Rejected agent access from {sender_node_id[:16]}... (no permission)")
+                            self.metrics.record_error("PermissionError", "message_routing")
+                            
+                            result = {
+                                "jsonrpc": "2.0",
+                                "id": message.get("id"),
+                                "error": {
+                                    "code": -32001,
+                                    "message": "Unauthorized: no permission to access agents",
+                                }
+                            }
+                            
+                            # Record metrics
+                            latency = time.time() - start_time
+                            self.metrics.record_message(message_type, "error", latency, message_size)
+                            
+                            return result
+            
+            # Handle node-level methods
+            if method.startswith("node/"):
+                result = await self._handle_node_method(method, message.get("params", {}))
+                
+                # Record metrics
+                latency = time.time() - start_time
+                status = "success" if result and "error" not in result else "error"
+                self.metrics.record_message(message_type, status, latency, message_size)
+                
+                return result
+            
+            # Handle agent methods (format: node_id:agent_id/method)
+            if ":" in method and "/" in method:
+                parts = method.split("/", 1)
+                target = parts[0]  # e.g., "node_id:agent_id"
+                agent_method = parts[1]  # e.g., "tools/list" or "chat/message"
             
             if ":" in target:
                 target_node_id, agent_id = target.split(":", 1)
@@ -455,22 +508,63 @@ class P2PNode:
                 
                 # Route to remote peer
                 else:
-                    return await self._route_to_remote_agent(target_node_id, agent_id, agent_method, message)
-        
-        # Handle direct agent methods (format: agent_id/method)
-        if "/" in method:
-            parts = method.split("/", 1)
-            agent_id = parts[0]
-            agent_method = parts[1]
+                    result = await self._route_to_remote_agent(target_node_id, agent_id, agent_method, message)
+                    
+                    # Record metrics
+                    latency = time.time() - start_time
+                    status = "success" if result and "error" not in result else "error"
+                    self.metrics.record_message(message_type, status, latency, message_size)
+                    
+                    return result
             
-            if agent_method == "chat/message":
-                params = message.get("params", {})
-                msg_content = params.get("message", "")
-                room_id = params.get("room_id", "main")
-                return await self._handle_chat_message(agent_id, msg_content, room_id)
+            # Handle direct agent methods (format: agent_id/method)
+            if "/" in method:
+                parts = method.split("/", 1)
+                agent_id = parts[0]
+                agent_method = parts[1]
+                
+                if agent_method == "chat/message":
+                    params = message.get("params", {})
+                    msg_content = params.get("message", "")
+                    room_id = params.get("room_id", "main")
+                    result = await self._handle_chat_message(agent_id, msg_content, room_id)
+                    
+                    # Record metrics
+                    latency = time.time() - start_time
+                    status = "success" if result and "error" not in result else "error"
+                    self.metrics.record_message(message_type, status, latency, message_size)
+                    
+                    return result
+            
+            # Default: try local agents
+            result = await self._route_to_local_agent(None, method, message.get("params", {}))
+            
+            # Record metrics
+            latency = time.time() - start_time
+            status = "success" if result and "error" not in result else "error"
+            self.metrics.record_message(message_type, status, latency, message_size)
+            
+            return result
         
-        # Default: try local agents
-        return await self._route_to_local_agent(None, method, message.get("params", {}))
+        except Exception as e:
+            # Record error metrics
+            logger.error(f"Error routing message: {e}", exc_info=True)
+            self.metrics.record_error("RoutingError", "message_routing")
+            
+            latency = time.time() - start_time
+            self.metrics.record_message(message_type, "error", latency, message_size)
+            
+            # Return error response
+            if "id" in message:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "error": {
+                        "code": -32603,
+                        "message": f"Internal error: {str(e)}",
+                    }
+                }
+            return None
     
     async def _handle_node_method(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Handle node-level methods"""

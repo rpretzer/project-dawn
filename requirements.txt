@@ -16,3 +16,8 @@ libp2p>=0.1.0  # Python Libp2p implementation
 pytest>=7.0
 pytest-asyncio>=0.21.0
 
+# Observability
+prometheus-client>=0.19.0
+
+# Configuration (optional, for YAML support)
+PyYAML>=6.0

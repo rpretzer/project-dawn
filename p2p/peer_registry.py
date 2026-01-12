@@ -4,10 +4,13 @@ Peer Registry
 Manages local registry of known peers.
 """
 
+import json
 import logging
 import time
-from typing import Dict, List, Optional, Callable
+from pathlib import Path
+from typing import Dict, List, Optional, Callable, Any
 from .peer import Peer
+from data_paths import data_root
 
 logger = logging.getLogger(__name__)
 
@@ -19,22 +22,34 @@ class PeerRegistry:
     Maintains a registry of known peers with health tracking.
     """
     
-    def __init__(self, peer_timeout: float = 300.0, peer_validator: Optional[Any] = None):
+    def __init__(self, peer_timeout: float = 300.0, peer_validator: Optional[Any] = None, 
+                 data_dir: Optional[Path] = None, persist: bool = True):
         """
         Initialize peer registry
         
         Args:
             peer_timeout: Seconds before considering peer dead (default 5 minutes)
             peer_validator: Optional peer validator for trust checks
+            data_dir: Data directory for persistence (defaults to data_root/mesh)
+            persist: Enable persistence (default True)
         """
         self.peers: Dict[str, Peer] = {}  # node_id -> Peer
         self.peer_timeout = peer_timeout
         self.peer_validator = peer_validator
+        self.persist = persist
+        self.data_dir = data_dir or data_root() / "mesh"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.peer_registry_path = self.data_dir / "peer_registry.json"
+        
         self.on_peer_added: Optional[Callable[[Peer], None]] = None
         self.on_peer_removed: Optional[Callable[[Peer], None]] = None
         self.on_peer_updated: Optional[Callable[[Peer], None]] = None
         
-        logger.debug("PeerRegistry initialized")
+        # Load persisted peers
+        if self.persist:
+            self._load()
+        
+        logger.debug(f"PeerRegistry initialized with {len(self.peers)} peers")
     
     def add_peer(self, peer: Peer, skip_validation: bool = False) -> bool:
         """
@@ -68,6 +83,10 @@ class PeerRegistry:
             if self.on_peer_updated:
                 self.on_peer_updated(peer)
         
+        # Persist changes
+        if self.persist:
+            self._save()
+        
         return True
     
     def remove_peer(self, node_id: str) -> Optional[Peer]:
@@ -85,6 +104,9 @@ class PeerRegistry:
             logger.info(f"Removed peer: {node_id[:16]}...")
             if self.on_peer_removed:
                 self.on_peer_removed(peer)
+            # Persist changes
+            if self.persist:
+                self._save()
             return peer
         return None
     
@@ -193,6 +215,9 @@ class PeerRegistry:
         """Clear all peers from registry"""
         self.peers.clear()
         logger.debug("Peer registry cleared")
+        # Persist changes
+        if self.persist:
+            self._save()
     
     def get_peer_stats(self) -> Dict[str, Any]:
         """Get registry statistics"""
@@ -206,6 +231,34 @@ class PeerRegistry:
             "dead_peers": len(self.peers) - len(alive),
             "average_health_score": sum(p.health_score for p in self.peers.values()) / len(self.peers) if self.peers else 0.0,
         }
+    
+    def _load(self) -> None:
+        """Load peer registry from disk"""
+        if not self.peer_registry_path.exists():
+            return
+        
+        try:
+            data = json.loads(self.peer_registry_path.read_text(encoding="utf-8"))
+            for item in data.get("peers", []):
+                peer = Peer.from_dict(item)
+                self.peers[peer.node_id] = peer
+            logger.debug(f"Loaded {len(self.peers)} peers from {self.peer_registry_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load peer registry: {e}")
+    
+    def _save(self) -> None:
+        """Save peer registry to disk (atomic write)"""
+        try:
+            data = {
+                "version": 1,
+                "peers": [peer.to_dict() for peer in self.peers.values()],
+            }
+            tmp_path = self.peer_registry_path.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            tmp_path.replace(self.peer_registry_path)
+            logger.debug(f"Saved {len(self.peers)} peers to {self.peer_registry_path}")
+        except Exception as e:
+            logger.error(f"Failed to save peer registry: {e}")
 
 
 
