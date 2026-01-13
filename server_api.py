@@ -6,6 +6,7 @@ Provides HTTP endpoints for metrics, health checks, and monitoring.
 
 import json
 import logging
+import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Dict, Any
@@ -220,12 +221,35 @@ class APIServer:
         self.server = None
         self.thread = None
     
-    def start(self):
-        """Start API server in background thread"""
+    def start(self, max_retries: int = 5):
+        """Start API server in background thread
+
+        Args:
+            max_retries: Maximum number of port binding attempts before giving up
+        """
         def handler_factory(*args, **kwargs):
             return APIHandler(*args, node=self.node, health_checker=self.health_checker, **kwargs)
-        
-        self.server = HTTPServer((self.host, self.port), handler_factory)
+
+        original_port = self.port
+        for attempt in range(max_retries):
+            try:
+                self.server = HTTPServer((self.host, self.port), handler_factory)
+                break
+            except OSError as e:
+                if e.errno == 98:  # Address already in use
+                    if attempt < max_retries - 1:
+                        # Try a random port
+                        import socket
+                        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                            s.bind((self.host, 0))
+                            self.port = s.getsockname()[1]
+                        logger.warning(f"Port {original_port if attempt == 0 else 'alternative'} unavailable, trying {self.port}")
+                    else:
+                        logger.error(f"Failed to bind API server after {max_retries} attempts")
+                        raise
+                else:
+                    raise
+
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         logger.info(f"API server started on http://{self.host}:{self.port}")
