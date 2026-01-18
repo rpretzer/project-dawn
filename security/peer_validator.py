@@ -5,7 +5,7 @@ Validates peers before adding them to the registry.
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from crypto import MessageSigner
 from crypto.identity import NodeIdentity
 from .trust import TrustManager, TrustLevel

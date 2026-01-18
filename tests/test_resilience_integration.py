@@ -6,14 +6,12 @@ Tests rate limiting, circuit breakers, and retry policies in realistic scenarios
 
 import pytest
 import asyncio
-import time
 from crypto import NodeIdentity
 from p2p.p2p_node import P2PNode
 from p2p.peer import Peer
-from resilience.errors import RateLimitError, CircuitBreakerOpenError, NetworkError
-from resilience.rate_limit import RateLimiter, RateLimitConfig
+from resilience.errors import NetworkError
+from resilience.rate_limit import RateLimitConfig
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
-from resilience.retry import RetryPolicy, retry_with_policy
 
 
 @pytest.mark.asyncio

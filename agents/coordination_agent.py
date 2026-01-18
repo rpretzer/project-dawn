@@ -5,7 +5,6 @@ Special agent that provides coordination and collaboration tools for multi-agent
 Implements Phase 1 tools, resources, and prompts from the development plan.
 """
 
-import asyncio
 import json
 import logging
 import time
@@ -411,11 +410,12 @@ class CoordinationAgent(BaseAgent):
         """
         try:
             # Parse target
-            if ":" in target:
-                node_id, agent_id = target.split(":", 1)
-            else:
-                node_id = self.p2p_node.node_id
-                agent_id = target
+            # TODO: Refactor p2p_node.call_agent to accept parsed node_id and agent_id
+            # if ":" in target:
+            #     node_id, agent_id = target.split(":", 1)
+            # else:
+            #     node_id = self.p2p_node.node_id
+            #     agent_id = target
             
             # Call agent via P2P node
             response = await self.p2p_node.call_agent(
@@ -680,7 +680,8 @@ class CoordinationAgent(BaseAgent):
                 agent_list = json.loads(available_agents)
             else:
                 agent_list = [a.strip() for a in available_agents.split(",")]
-        except:
+        except Exception as e:
+            logger.debug(f"Could not parse available_agents as JSON, treating as single item. Error: {e}")
             agent_list = [available_agents]
         
         # Get agent details
@@ -737,7 +738,8 @@ class CoordinationAgent(BaseAgent):
                 agents = json.loads(agent_list)
             else:
                 agents = [a.strip() for a in agent_list.split(",")]
-        except:
+        except Exception as e:
+            logger.debug(f"Could not parse agent_list as JSON, treating as single item. Error: {e}")
             agents = [agent_list]
         
         # Get agent capabilities
@@ -1281,11 +1283,12 @@ class CoordinationAgent(BaseAgent):
             if isinstance(network_data, str):
                 try:
                     data = json.loads(network_data)
-                except:
+                except json.JSONDecodeError:
                     data = {"raw": network_data}
             else:
                 data = network_data
-        except:
+        except Exception as e:
+            logger.debug(f"Could not process network_data, treating as raw string. Error: {e}")
             data = {"raw": str(network_data)}
         
         # Get actual network info if not provided
@@ -1323,7 +1326,8 @@ class CoordinationAgent(BaseAgent):
                 peer_list = json.loads(current_peers)
             else:
                 peer_list = [p.strip() for p in current_peers.split(",")]
-        except:
+        except Exception as e:
+            logger.debug(f"Could not parse current_peers as JSON, treating as single item. Error: {e}")
             peer_list = [current_peers]
         
         # Get all available peers

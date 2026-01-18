@@ -1,6 +1,5 @@
 """Tests for JSON-RPC 2.0 protocol handler"""
 
-import pytest
 from mcp.protocol import (
     JSONRPCRequest,
     JSONRPCResponse,

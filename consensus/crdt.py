@@ -7,7 +7,7 @@ Simple CRDT map for distributed state synchronization.
 import logging
 import time
 from typing import Dict, Any, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 

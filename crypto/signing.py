@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 from typing import Optional
 from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives import hashes
 from cryptography.exceptions import InvalidSignature
 from .identity import NodeIdentity
 

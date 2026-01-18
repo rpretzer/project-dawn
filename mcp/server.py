@@ -4,10 +4,9 @@ MCP Server Implementation
 Server that exposes tools, resources, and prompts via MCP protocol.
 """
 
-import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Callable, Awaitable
-from .protocol import JSONRPCHandler, JSONRPCRequest, JSONRPCResponse, JSONRPCError
+from .protocol import JSONRPCHandler, JSONRPCResponse, JSONRPCError
 from .tools import ToolRegistry, MCPTool
 from .resources import ResourceRegistry, MCPResource
 from .prompts import PromptRegistry, MCPPrompt

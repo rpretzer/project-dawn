@@ -48,9 +48,9 @@ def build_with_pyinstaller():
     print(f"Command: {' '.join(cmd)}")
     
     try:
-        result = subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True)
         _write_sha256(output_dir / "project-dawn-server")
-        print(f"\n✓ Build successful!")
+        print("\n✓ Build successful!")
         print(f"Executable: {output_dir / 'project-dawn-server'}")
         if sys.platform == "win32":
             print(f"Executable: {output_dir / 'project-dawn-server.exe'}")
@@ -87,9 +87,9 @@ def build_with_nuitka():
     print(f"Command: {' '.join(cmd)}")
     
     try:
-        result = subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True)
         _write_sha256(output_dir / "project-dawn-server")
-        print(f"\n✓ Build successful!")
+        print("\n✓ Build successful!")
         print(f"Executable: {output_dir / 'project-dawn-server'}")
         if sys.platform == "win32":
             print(f"Executable: {output_dir / 'project-dawn-server.exe'}")

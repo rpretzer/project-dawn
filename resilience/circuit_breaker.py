@@ -10,9 +10,9 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Awaitable, Optional, Any, Dict
+from typing import Callable, Awaitable, Optional, Any
 
-from .errors import CircuitBreakerOpenError, ResilienceError
+from .errors import CircuitBreakerOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ class CircuitBreaker:
                 result = await func()
                 self._record_success()
                 return result
-            except self.config.expected_exception as e:
+            except self.config.expected_exception:
                 self._record_failure()
                 raise
             except Exception as e:
@@ -205,7 +205,7 @@ class CircuitBreaker:
             result = await func()
             self._record_success()
             return result
-        except self.config.expected_exception as e:
+        except self.config.expected_exception:
             self._record_failure()
             raise
         except Exception as e:

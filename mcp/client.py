@@ -6,9 +6,9 @@ Client that connects to MCP servers and calls tools.
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional, Callable, Awaitable
-from .protocol import JSONRPCRequest, JSONRPCResponse, JSONRPCError
-from .transport import WebSocketTransport, ConnectionState
+from typing import Any, Dict, List, Optional
+from .protocol import JSONRPCRequest, JSONRPCResponse
+from .transport import WebSocketTransport
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ class MCPClient:
                 self._pending_requests.pop(request_id, None)
                 raise TimeoutError(f"Request '{method}' timed out")
         
-        except Exception as e:
+        except Exception:
             self._pending_requests.pop(request_id, None)
             raise
     

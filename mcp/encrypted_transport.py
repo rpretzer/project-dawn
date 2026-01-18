@@ -153,7 +153,7 @@ class EncryptedWebSocketTransport:
                         text_message = message.decode('utf-8')
                         await self._handle_received_message(text_message)
                     except UnicodeDecodeError:
-                        logger.error(f"Failed to decode message")
+                        logger.error("Failed to decode message")
         except Exception as e:
             logger.error(f"Error in receive loop: {e}")
             self.connection_state = ConnectionState.ERROR
@@ -182,12 +182,26 @@ class EncryptedWebSocketTransport:
                             sender = envelope.get("sender", "unknown")
                             signature = bytes.fromhex(envelope["signature"])
                             
-                            # Note: Would need peer's public key to verify signature
-                            # For now, just log
-                            logger.debug(f"Received signed message from {sender[:16]}...")
+                            if self.peer_public_key:
+                                # Reconstruct the message that was signed
+                                envelope_for_signing = {
+                                    "type": envelope["type"],
+                                    "nonce": envelope["nonce"],
+                                    "ciphertext": envelope["ciphertext"],
+                                }
+                                envelope_bytes = json.dumps(envelope_for_signing, sort_keys=True).encode('utf-8')
+
+                                # Verify the signature
+                                if MessageSigner.verify_with_public_key_bytes(envelope_bytes, signature, self.peer_public_key):
+                                    logger.debug(f"Verified signed message from server {sender[:16]}...")
+                                else:
+                                    logger.warning(f"INVALID signature in message from server {sender[:16]}")
+                                    return  # Drop the message
+                            else:
+                                logger.warning(f"Received signed message from server {sender[:16]} but have no public key to verify.")
                         
                         message = decrypted_message
-                        logger.debug(f"Decrypted message from server")
+                        logger.debug("Decrypted message from server")
                 except (json.JSONDecodeError, KeyError, ValueError):
                     # Not encrypted or invalid format, use as-is
                     pass

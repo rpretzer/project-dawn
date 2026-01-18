@@ -5,10 +5,9 @@ Handles cryptographic identity for nodes using Ed25519 keypairs.
 """
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.backends import default_backend
 
 logger = logging.getLogger(__name__)
 

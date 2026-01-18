@@ -77,7 +77,6 @@ class PeerRegistry:
                 self.on_peer_added(peer)
         else:
             # Update existing peer
-            old_peer = self.peers[peer.node_id]
             self.peers[peer.node_id] = peer
             logger.debug(f"Updated peer: {peer.node_id[:16]}...")
             if self.on_peer_updated:

@@ -8,7 +8,7 @@ This module provides the concrete implementation for libp2p_transport.py
 import asyncio
 import inspect
 import logging
-from typing import Optional, List, Dict, Any, Callable, Awaitable
+from typing import Optional, List, Any
 
 logger = logging.getLogger(__name__)
 

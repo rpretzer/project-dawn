@@ -5,11 +5,10 @@ Central coordinator that manages MCP clients, routes messages,
 and coordinates AI integration.
 """
 
-import asyncio
 import json
 import logging
 import uuid
-from typing import Any, Dict, List, Optional, Callable, Awaitable
+from typing import Any, Dict, List, Optional
 from .event_bus import EventBus, Event, EventType
 from mcp.server import MCPServer
 from mcp.client import MCPClient
@@ -145,7 +144,7 @@ class MCPHost:
         session_id = self.message_router.pop(str(client_id), None)
         
         if session_id and session_id in self.sessions:
-            session = self.sessions.pop(session_id)
+            self.sessions.pop(session_id)
             
             if session_id in self.clients:
                 del self.clients[session_id]

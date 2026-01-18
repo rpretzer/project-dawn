@@ -158,18 +158,21 @@ async def main():
     logger.info(f"Registered code agent: {code_agent.name} with {len(code_agent.get_tools())} tools, {len(code_agent.server.get_resources())} resources, {len(code_agent.server.get_prompts())} prompts")
     
     # Start HTTP server for frontend
-    web_server = WebServer(host=host, port=http_port, ws_url=f"ws://{host}:{ws_port}")
+    # Use the actual WebSocket port that was selected
+    ws_url = f"ws://{host}:{ws_port}"
+    web_server = WebServer(host=host, port=http_port, ws_url=ws_url)
     web_server.start()
+    logger.info(f"Frontend config: WebSocket URL = {ws_url}, HTTP URL = http://{host}:{http_port}")
     
     # Initialize metrics
-    metrics_collector = register_metrics()
+    register_metrics()
     
     # Initialize health checker
     health_checker = HealthChecker()
     
     # Register health checks for node (after node is started)
     async def check_peers():
-        from health import HealthCheckResult
+        from health import HealthCheckResult, HealthStatus
         import time
         peer_count = len(node.peer_connections) if hasattr(node, 'peer_connections') else 0
         return HealthCheckResult(

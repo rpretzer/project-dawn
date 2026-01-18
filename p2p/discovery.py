@@ -8,11 +8,10 @@ Implements various peer discovery mechanisms:
 """
 
 import asyncio
-import json
 import logging
 import socket
 import time
-from typing import List, Dict, Any, Optional, Callable, Set
+from typing import List, Dict, Any, Optional, Callable, Awaitable
 from .peer import Peer
 from .peer_registry import PeerRegistry
 from .dht import DHT

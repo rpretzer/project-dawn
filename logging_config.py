@@ -7,7 +7,7 @@ Provides structured logging with JSON format option and configurable log levels.
 import json
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 class JSONFormatter(logging.Formatter):

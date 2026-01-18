@@ -5,7 +5,6 @@ WebSocket transport implementation for MCP protocol.
 """
 
 import asyncio
-import json
 import logging
 from typing import Any, Dict, Optional, Callable, Awaitable
 from enum import Enum

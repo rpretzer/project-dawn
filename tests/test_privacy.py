@@ -10,7 +10,6 @@ from p2p.privacy import (
     TimingObfuscator,
     OnionRouter,
     PrivacyLayer,
-    MIN_PADDING_SIZE,
 )
 
 

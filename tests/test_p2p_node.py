@@ -3,11 +3,9 @@ Tests for P2P Node
 """
 
 import pytest
-import asyncio
-from p2p import P2PNode, Peer, PeerRegistry
+from p2p import P2PNode, Peer
 from crypto import NodeIdentity
 from mcp.server import MCPServer
-from mcp.tools import MCPTool, ToolRegistry
 
 
 class TestP2PNode:

@@ -1,10 +1,8 @@
 """Tests for MCP Server and Client"""
 
-import asyncio
 import pytest
 from mcp.server import MCPServer
 from mcp.client import MCPClient
-from mcp.tools import MCPTool
 from mcp.transport import WEBSOCKETS_AVAILABLE
 
 

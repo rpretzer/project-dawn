@@ -3,7 +3,6 @@ Tests for Coordination Agent (Phase 1)
 """
 
 import pytest
-import asyncio
 from agents.coordination_agent import CoordinationAgent
 from agents.task_manager import TaskManager, TaskStatus
 from p2p.p2p_node import P2PNode

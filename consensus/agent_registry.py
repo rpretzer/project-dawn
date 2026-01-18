@@ -7,7 +7,7 @@ Uses CRDT-like semantics for eventual consistency.
 
 import logging
 import time
-from typing import Dict, List, Optional, Set, Any
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from .crdt import CRDTMap
 

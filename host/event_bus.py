@@ -4,7 +4,6 @@ Event Bus for MCP Host
 Pub/sub system for state changes and events.
 """
 
-import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional, Callable, Awaitable

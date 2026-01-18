@@ -8,7 +8,6 @@ Usage:
 
 import hashlib
 import sys
-import os
 from pathlib import Path
 
 

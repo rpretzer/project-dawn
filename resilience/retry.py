@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Awaitable, Optional, Type, Tuple, Any
 
-from .errors import RetryExhaustedError, ResilienceError
+from .errors import RetryExhaustedError
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +181,6 @@ def retry_sync(
     Raises:
         RetryExhaustedError: If all retry attempts are exhausted
     """
-    import random
     
     last_error: Optional[Exception] = None
     

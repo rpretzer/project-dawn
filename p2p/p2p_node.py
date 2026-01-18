@@ -9,22 +9,21 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, Dict, Optional, List, Callable, Awaitable
+from typing import Any, Dict, Optional, List, Callable
 from uuid import uuid4
 
 from crypto import NodeIdentity
 from mcp.server import MCPServer
-from mcp.protocol import JSONRPCRequest, JSONRPCResponse
 from mcp.encrypted_transport import EncryptedWebSocketServer, EncryptedWebSocketTransport
 from .peer import Peer
 from .peer_registry import PeerRegistry
 from .discovery import PeerDiscovery
 from .privacy import PrivacyLayer
 from consensus import DistributedAgentRegistry
-from llm.config import LLMConfig, load_config, save_config
+from llm.config import load_config, save_config
 from llm.ollama import list_models_async, chat_async
 from security import TrustManager, PeerValidator, AuthManager, Permission, AuditLogger, AuditEventType
-from metrics import register_metrics, get_metrics_collector
+from metrics import register_metrics
 from resilience.rate_limit import RateLimiter, RateLimitConfig
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
 from resilience.errors import RateLimitError, CircuitBreakerOpenError, NetworkError
@@ -121,6 +120,12 @@ class P2PNode:
         self.on_agent_unregistered: Optional[Callable[[str], None]] = None
         self.on_peer_connected: Optional[Callable[[Peer], None]] = None
         self.on_peer_disconnected: Optional[Callable[[Peer], None]] = None
+        
+        # Resilience: Circuit breakers and rate limiters
+        self.cb_config = CircuitBreakerConfig()
+        self.circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self.rl_config = RateLimitConfig()
+        self.peer_rate_limiters: Dict[str, RateLimiter] = {}
         
         # Track start time for uptime calculation
         self.start_time: Optional[float] = None
@@ -277,15 +282,22 @@ class P2PNode:
             return True
         
         try:
+            # Get or create circuit breaker for this peer
+            breaker = self.circuit_breakers.get(peer.node_id)
+            if not breaker:
+                breaker = CircuitBreaker(config=self.cb_config, name=f"peer-{peer.node_id[:8]}")
+                self.circuit_breakers[peer.node_id] = breaker
+
             # Create encrypted transport
             transport = EncryptedWebSocketTransport(
                 url=peer.address,
                 identity=self.identity,
+                peer_public_key=peer.public_key,
                 enable_encryption=self.enable_encryption,
             )
             
-            # Connect
-            await transport.connect()
+            # Connect using the circuit breaker
+            await breaker.call_async(transport.connect)
             
             # Store connection
             self.peer_connections[peer.node_id] = transport
@@ -421,6 +433,14 @@ class P2PNode:
         message_size = len(str(message).encode('utf-8'))
         
         try:
+            # Rate limit check for peer messages
+            if sender_node_id and sender_node_id != self.node_id:
+                limiter = self.peer_rate_limiters.get(sender_node_id)
+                if not limiter:
+                    limiter = RateLimiter(default_config=self.rl_config)
+                    self.peer_rate_limiters[sender_node_id] = limiter
+                limiter.allow(sender_node_id)
+
             # Authorization check for peer messages
             if sender_node_id and sender_node_id != self.node_id:
                 # Check if peer is trusted
@@ -546,6 +566,22 @@ class P2PNode:
             
             return result
         
+        except RateLimitError as e:
+            logger.warning(f"Rate limit exceeded for peer {sender_node_id[:16]}...: {e}")
+            self.metrics.record_error("RateLimitError", "message_routing")
+            if "id" in message:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "error": {
+                        "code": -32005,
+                        "message": "Rate limit exceeded",
+                        "data": {
+                            "retry_after": e.retry_after,
+                        }
+                    }
+                }
+            return None
         except Exception as e:
             # Record error metrics
             logger.error(f"Error routing message: {e}", exc_info=True)
@@ -680,11 +716,9 @@ class P2PNode:
                 
                 return {
                     "jsonrpc": "2.0",
-                    "result": {
+                    "result": agent_info.to_dict() if agent_info else {
                         "agent_id": agent_id,
-                        "name": agent_name,
-                        "status": "created",
-                        "full_agent_id": f"{self.node_id}:{agent_id}",
+                        "status": "created_but_not_found_in_registry"
                     }
                 }
             except Exception as e:

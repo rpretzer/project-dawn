@@ -687,8 +687,9 @@ class CodeAgent(BaseAgent):
                                         "type": "content_match",
                                         "snippet": "\n".join(snippet_lines),
                                     })
-                        except:
-                            # Skip binary files
+                        except Exception as e:
+                            # Skip binary files or files with reading errors
+                            logger.debug(f"Could not read file {file_path} during search: {e}")
                             pass
             
             return {
@@ -915,13 +916,13 @@ class CodeAgent(BaseAgent):
                             except (AttributeError, ValueError):
                                 pass
                     formatted_code = black.format_str(code, mode=mode)
-                    logger.debug(f"Formatted Python code using black")
+                    logger.debug("Formatted Python code using black")
                 except ImportError:
                     # Fallback: basic Python formatting using autopep8 or manual formatting
                     try:
                         import autopep8
                         formatted_code = autopep8.fix_code(code, options={'aggressive': 1})
-                        logger.debug(f"Formatted Python code using autopep8")
+                        logger.debug("Formatted Python code using autopep8")
                     except ImportError:
                         # Last resort: basic formatting (normalize whitespace)
                         lines = code.split('\n')
@@ -945,7 +946,7 @@ class CodeAgent(BaseAgent):
                             if any(stripped.startswith(x) for x in ('return', 'break', 'continue', 'pass', 'raise', 'assert')):
                                 indent_level = max(0, indent_level - 1)
                         formatted_code = '\n'.join(formatted_lines)
-                        logger.debug(f"Formatted Python code using basic formatter")
+                        logger.debug("Formatted Python code using basic formatter")
             
             # JavaScript/TypeScript formatting using prettier (if available via subprocess)
             elif language_lower in ("javascript", "js", "typescript", "ts", "jsx", "tsx"):
@@ -965,14 +966,14 @@ class CodeAgent(BaseAgent):
                 except (subprocess.TimeoutExpired, FileNotFoundError):
                     # Fallback: basic JavaScript formatting
                     formatted_code = code  # Keep as-is if prettier not available
-                    logger.debug(f"Prettier not available, code kept as-is")
+                    logger.debug("Prettier not available, code kept as-is")
             
             # JSON formatting
             elif language_lower == "json":
                 try:
                     parsed = json.loads(code)
                     formatted_code = json.dumps(parsed, indent=2, sort_keys=True)
-                    logger.debug(f"Formatted JSON code")
+                    logger.debug("Formatted JSON code")
                 except json.JSONDecodeError:
                     formatted_code = code  # Invalid JSON, return as-is
             
@@ -982,7 +983,7 @@ class CodeAgent(BaseAgent):
                     import yaml
                     parsed = yaml.safe_load(code)
                     formatted_code = yaml.dump(parsed, default_flow_style=False, sort_keys=False)
-                    logger.debug(f"Formatted YAML code")
+                    logger.debug("Formatted YAML code")
                 except ImportError:
                     formatted_code = code  # Keep as-is if PyYAML not available
                 except yaml.YAMLError:
@@ -1161,7 +1162,8 @@ class CodeAgent(BaseAgent):
                 if imports:
                     rel_path = str(py_file.relative_to(self.workspace_path))
                     dependencies[rel_path] = list(set(imports))
-            except:
+            except Exception as e:
+                logger.warning(f"Failed to analyze dependencies for file {py_file}: {e}")
                 pass
         
         return json.dumps({
@@ -1198,7 +1200,8 @@ class CodeAgent(BaseAgent):
                             lines = len(f.readlines())
                             metrics["total_lines"] += lines
                             metrics["languages"][language] = metrics["languages"].get(language, 0) + lines
-                    except:
+                    except Exception as e:
+                        logger.warning(f"Failed to calculate metrics for file {file_path}: {e}")
                         pass
         
         return json.dumps({
@@ -1222,7 +1225,7 @@ class CodeAgent(BaseAgent):
         focus: Optional[str] = None
     ) -> str:
         """Prompt handler for code review"""
-        prompt = f"Code Review Request\n\n"
+        prompt = "Code Review Request\n\n"
         prompt += f"Language: {language}\n\n"
         prompt += f"Code:\n```{language}\n{code}\n```\n\n"
         
@@ -1250,7 +1253,7 @@ class CodeAgent(BaseAgent):
         """Prompt handler for code explanation"""
         detail = detail_level or "detailed"
         
-        prompt = f"Code Explanation Request\n\n"
+        prompt = "Code Explanation Request\n\n"
         prompt += f"Language: {language}\n"
         prompt += f"Detail Level: {detail}\n\n"
         prompt += f"Code:\n```{language}\n{code}\n```\n\n"
@@ -1274,7 +1277,7 @@ class CodeAgent(BaseAgent):
         goals: Optional[str] = None
     ) -> str:
         """Prompt handler for refactoring suggestion"""
-        prompt = f"Refactoring Suggestion Request\n\n"
+        prompt = "Refactoring Suggestion Request\n\n"
         prompt += f"Language: {language}\n\n"
         prompt += f"Code:\n```{language}\n{code}\n```\n\n"
         
@@ -1282,7 +1285,7 @@ class CodeAgent(BaseAgent):
             try:
                 goals_list = json.loads(goals) if goals.startswith("[") else [goals]
                 prompt += f"Refactoring Goals: {', '.join(goals_list)}\n\n"
-            except:
+            except json.JSONDecodeError:
                 prompt += f"Refactoring Goals: {goals}\n\n"
         
         prompt += "Please suggest refactoring improvements, including:\n"

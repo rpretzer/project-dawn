@@ -7,7 +7,6 @@ Helper functions for cryptographic operations.
 import hashlib
 import os
 import logging
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 

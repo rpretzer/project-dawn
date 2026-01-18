@@ -3,7 +3,6 @@ Tests for encrypted transport layer
 """
 
 import pytest
-import asyncio
 import json
 from crypto import NodeIdentity
 from mcp.encrypted_transport import EncryptedWebSocketTransport, EncryptedWebSocketServer

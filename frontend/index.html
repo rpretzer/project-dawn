@@ -3,54 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Project Dawn - Observer Window</title>
-    <link rel="stylesheet" href="style.css">
+    <title>Project Dawn</title>
+    <link rel="stylesheet" href="style.css?v=2">
 </head>
-<body class="theme-light">
+<body class="theme-light mode-simple">
     <div class="app-container">
         <!-- Header -->
         <header class="app-header">
             <div class="header-left">
-                <button class="icon-button" id="new-agent" title="Create new agent">
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd"/>
-                    </svg>
-                </button>
-                <button class="icon-button" id="refresh-agents" title="Refresh">
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clip-rule="evenodd"/>
-                    </svg>
-                </button>
-                <h1 class="room-title">Observer Window</h1>
-            </div>
-            <div class="header-center">
-                <div class="status-indicator"></div>
-                <span class="status-text">Connecting...</span>
-                <div class="resource-pill" id="resource-pill">
-                    <span class="resource-label">Resources</span>
-                    <span class="resource-value" id="resource-value">Stable</span>
-                </div>
-                <div class="volunteer-toggle">
-                    <span class="volunteer-label">Volunteer Mode</span>
-                    <button class="toggle-button" id="volunteer-toggle" title="Toggle Volunteer Mode">
-                        <span class="toggle-knob"></span>
-                    </button>
-                    <span class="volunteer-status" id="volunteer-status">Off</span>
+                <h1 class="app-title">Project Dawn</h1>
+                <div class="connection-status">
+                    <div class="status-indicator"></div>
+                    <span class="status-text">Connecting...</span>
                 </div>
             </div>
             <div class="header-right">
-                <div class="header-tabs">
-                    <button class="tab-button active" data-tab="tools">Tools</button>
-                    <button class="tab-button" data-tab="resources">Resources</button>
-                    <button class="tab-button" data-tab="prompts">Prompts</button>
-                </div>
-                <button class="icon-button" id="people-button" title="People">
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                        <path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM17 6a3 3 0 11-6 0 3 3 0 016 0zM12.93 17c.046-.327.07-.66.07-1a6.97 6.97 0 00-1.5-4.33A5 5 0 0119 16v1h-6.07zM6 11a5 5 0 015 5v1H1v-1a5 5 0 015-5z"/>
-                    </svg>
-                </button>
-                <button class="icon-button" id="settings-button" title="Settings">
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                <!-- Simple mode: just essential controls -->
+                <button class="mode-toggle" id="mode-toggle" title="Switch to Advanced Mode">
+                    <span class="mode-label">Simple</span>
+                    <svg class="mode-icon" width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/>
                     </svg>
                 </button>
@@ -64,152 +35,109 @@
 
         <!-- Main Content -->
         <div class="app-content">
-            <!-- Left Sidebar - Agents -->
-            <aside class="sidebar sidebar-left">
-                <div class="sidebar-content">
-                    <section class="local-agent-card" id="local-agent-card">
-                        <div class="card-title">Local Agent</div>
-                        <div class="agent-name" id="local-agent-name">Radiator-01</div>
-                        <div class="agent-meta">
-                            <div class="agent-meta-row">
-                                <span>PeerID</span>
-                                <span id="local-agent-peer">0xlocal</span>
-                            </div>
-                            <div class="agent-meta-row">
-                                <span>Logit Voice</span>
-                                <span id="local-agent-logit">LF-004</span>
-                            </div>
-                            <div class="agent-meta-row">
-                                <span>Status</span>
-                                <span class="status-pill status-online" id="local-agent-status">Online</span>
-                            </div>
+            <!-- Left Panel: Network (visible in both modes, compact in simple) -->
+            <aside class="panel-network" id="panel-network">
+                <div class="panel-section">
+                    <h2 class="section-title">Network</h2>
+                    <div class="network-stats">
+                        <div class="stat-item">
+                            <span class="stat-value" id="peer-count">0</span>
+                            <span class="stat-label">Peers</span>
                         </div>
-                    </section>
-                    <section class="peer-gallery">
-                        <div class="card-title">Peer Gallery</div>
-                        <div class="peer-list" id="peer-gallery">
-                            <div class="empty-state">No peers discovered</div>
+                        <div class="stat-item">
+                            <span class="stat-value" id="agent-count">0</span>
+                            <span class="stat-label">Agents</span>
                         </div>
-                    </section>
+                    </div>
+                    <div class="peer-list-compact" id="peer-list-compact">
+                        <div class="empty-state">No peers connected</div>
+                    </div>
+                </div>
+
+                <!-- Advanced mode: Agent selector -->
+                <div class="panel-section advanced-only">
+                    <h2 class="section-title">Active Agent</h2>
+                    <select id="agent-select" class="agent-select"></select>
+                </div>
+
+                <!-- Advanced mode: LLM Config -->
+                <div class="panel-section advanced-only">
+                    <h2 class="section-title">LLM Settings</h2>
+                    <div class="llm-config">
+                        <input id="llm-endpoint" class="config-input" type="text" value="http://localhost:11434" placeholder="Ollama endpoint" />
+                        <div class="llm-row">
+                            <select id="llm-model" class="config-select"></select>
+                            <button id="llm-refresh" class="btn-small">Refresh</button>
+                        </div>
+                        <button id="llm-save" class="btn-primary">Save</button>
+                        <div class="llm-status" id="llm-status">No model selected</div>
+                    </div>
                 </div>
             </aside>
 
-            <!-- Observer Window -->
-            <main class="observer-container">
-                <section class="stage-panel">
-                    <div class="panel-header">
-                        <h2>Stage</h2>
-                        <span class="panel-hint">Local / Trusted / Unknown</span>
+            <!-- Center: Chat/Messages -->
+            <main class="panel-chat">
+                <div class="messages-container" id="messages">
+                    <div class="welcome-message">
+                        <h2>Welcome to Project Dawn</h2>
+                        <p>Send a message to start chatting with your local agent.</p>
                     </div>
-                    <div class="stage-canvas" id="stage-canvas">
-                        <div class="stage-empty">Waiting for mesh signals...</div>
-                    </div>
-                </section>
-                <section class="transcript-panel">
-                    <div class="panel-header">
-                        <h2>Mesh Feed</h2>
-                        <span class="panel-hint">Live autonomous negotiations</span>
-                    </div>
-                    <div class="mesh-feed" id="mesh-feed">
-                        <div class="feed-empty">No activity yet</div>
-                    </div>
-                </section>
-                <div class="chat-input-container">
-                    <div class="chat-input-wrapper">
-                        <textarea 
-                            class="chat-input" 
-                            id="chat-input" 
-                            placeholder="Send a note to your local agent..."
-                            rows="1"
-                        ></textarea>
-                        <div class="chat-input-actions">
-                            <button class="icon-button" id="attach-button" title="Attach">
-                                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                                    <path d="M8 2a1 1 0 000 2h2a1 1 0 100-2H8z"/>
-                                    <path fill-rule="evenodd" d="M3 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H5a2 2 0 01-2-2V5zm9.707 5.707a1 1 0 00-1.414-1.414L9 12.586l-1.293-1.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
-                                </svg>
-                            </button>
-                            <button class="send-button" id="send-button" title="Send">
-                                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                                    <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"/>
-                                </svg>
-                            </button>
-                        </div>
-                    </div>
+                </div>
+                <div class="chat-input-area">
+                    <textarea
+                        class="chat-input"
+                        id="chat-input"
+                        placeholder="Type a message..."
+                        rows="1"
+                    ></textarea>
+                    <button class="send-button" id="send-button" title="Send">
+                        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                            <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"/>
+                        </svg>
+                    </button>
                 </div>
             </main>
 
-            <!-- Right Sidebar - Tools/Resources/Prompts -->
-            <aside class="sidebar sidebar-right">
-                <div class="sidebar-content">
-                    <section class="llm-panel">
-                        <div class="card-title">Local LLM</div>
-                        <label class="llm-label" for="llm-endpoint">Endpoint</label>
-                        <div class="llm-row">
-                            <input id="llm-endpoint" class="llm-input" type="text" value="http://localhost:11434" />
-                            <button id="llm-refresh" class="llm-button">Refresh</button>
-                        </div>
-                        <label class="llm-label" for="llm-model">Model</label>
-                        <div class="llm-row">
-                            <select id="llm-model" class="llm-select"></select>
-                            <button id="llm-save" class="llm-button primary">Save</button>
-                        </div>
-                        <div class="llm-status" id="llm-status">No model selected</div>
-                    </section>
-                    <section class="llm-panel">
-                        <div class="card-title">Active Agent</div>
-                        <label class="llm-label" for="agent-select">Agent</label>
-                        <div class="llm-row">
-                            <select id="agent-select" class="llm-select"></select>
-                            <button id="agent-refresh" class="llm-button">Refresh</button>
-                        </div>
-                        <div class="llm-status" id="agent-status">Using agent1</div>
-                    </section>
-                    <section class="inventory-detail" id="inventory-detail">
-                        <div class="card-title">Inventory Detail</div>
-                        <div class="inventory-detail-body">
-                            <div class="inventory-detail-title" id="inventory-detail-title">Select an item</div>
-                            <div class="inventory-detail-desc" id="inventory-detail-desc">Choose a tool, resource, or prompt to inspect.</div>
-                            <div class="inventory-detail-meta" id="inventory-detail-meta"></div>
-                            <div class="inventory-detail-form" id="inventory-detail-form"></div>
-                            <div class="inventory-detail-actions" id="inventory-detail-actions"></div>
-                            <pre class="inventory-detail-output" id="inventory-detail-output"></pre>
-                        </div>
-                    </section>
-                    <div class="tab-content active" id="tools-tab">
-                        <div class="tool-list" id="tool-list">
+            <!-- Right Panel: Tools/Resources (Advanced mode only) -->
+            <aside class="panel-tools advanced-only" id="panel-tools">
+                <div class="tools-header">
+                    <div class="tools-tabs">
+                        <button class="tab-btn active" data-tab="tools">Tools</button>
+                        <button class="tab-btn" data-tab="resources">Resources</button>
+                        <button class="tab-btn" data-tab="prompts">Prompts</button>
+                    </div>
+                </div>
+                <div class="tools-content">
+                    <div class="tab-panel active" id="tools-panel">
+                        <div class="item-list" id="tool-list">
                             <div class="empty-state">No tools available</div>
                         </div>
                     </div>
-                    <div class="tab-content" id="resources-tab" style="display: none;">
-                        <div class="resource-list" id="resource-list">
+                    <div class="tab-panel" id="resources-panel">
+                        <div class="item-list" id="resource-list">
                             <div class="empty-state">No resources available</div>
                         </div>
                     </div>
-                    <div class="tab-content" id="prompts-tab" style="display: none;">
-                        <div class="prompt-list" id="prompt-list">
+                    <div class="tab-panel" id="prompts-panel">
+                        <div class="item-list" id="prompt-list">
                             <div class="empty-state">No prompts available</div>
                         </div>
                     </div>
                 </div>
+                <!-- Item detail panel -->
+                <div class="item-detail" id="item-detail">
+                    <div class="detail-header">
+                        <h3 id="detail-title">Select an item</h3>
+                    </div>
+                    <p id="detail-desc" class="detail-desc">Choose a tool, resource, or prompt from the list above.</p>
+                    <div id="detail-form" class="detail-form"></div>
+                    <div id="detail-actions" class="detail-actions"></div>
+                    <pre id="detail-output" class="detail-output"></pre>
+                </div>
             </aside>
         </div>
     </div>
-    <div class="modal-overlay hidden" id="modal-overlay">
-        <div class="modal">
-            <div class="modal-header">
-                <h3 class="modal-title" id="modal-title">Modal</h3>
-                <button class="icon-button" id="modal-close" title="Close">
-                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                        <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/>
-                    </svg>
-                </button>
-            </div>
-            <div class="modal-body" id="modal-body"></div>
-            <div class="modal-footer" id="modal-footer"></div>
-        </div>
-    </div>
 
-    <script type="module" src="app.js"></script>
+    <script type="module" src="app.js?v=2"></script>
 </body>
 </html>

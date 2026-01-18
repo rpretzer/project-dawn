@@ -7,12 +7,11 @@ import asyncio
 import tempfile
 import shutil
 from pathlib import Path
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock
 
 from agents.coordination_agent import CoordinationAgent
 from agents.code_agent import CodeAgent
 from p2p.p2p_node import P2PNode
-from crypto import NodeIdentity
 
 
 @pytest.fixture

@@ -4,13 +4,11 @@ First Agent Implementation
 Simple agent with basic memory tools for testing.
 """
 
-import asyncio
 import logging
 import json
 import time
 import uuid
 import platform
-import os
 from typing import Any, Dict, List, Optional
 from collections import defaultdict
 from .base_agent import BaseAgent
@@ -1226,8 +1224,6 @@ class FirstAgent(BaseAgent):
                 doc_tf[token] = doc_tf.get(token, 0) + 1
             
             # Calculate TF-IDF vectors
-            query_vector = []
-            doc_vector = []
             all_terms = query_tokens | content_tokens
             
             dot_product = 0.0
@@ -1528,11 +1524,12 @@ class FirstAgent(BaseAgent):
                 source_list = json.loads(sources) if sources.startswith("[") else sources.split(",")
             else:
                 source_list = sources
-        except:
+        except Exception as e:
+            logger.debug(f"Could not parse sources as JSON or comma-separated, treating as single item. Error: {e}")
             source_list = [sources] if isinstance(sources, str) else sources
         
         synthesis_parts = [
-            f"Knowledge Synthesis",
+            "Knowledge Synthesis",
             "",
             f"**Question**: {question}",
             "",
@@ -1728,7 +1725,7 @@ class FirstAgent(BaseAgent):
         return {
             "message_id": message_id,
             "success": True,
-            "message": f"Message sent to channel",
+            "message": "Message sent to channel",
         }
     
     # Phase 5: Communication & Notifications resource handlers
@@ -1781,7 +1778,7 @@ class FirstAgent(BaseAgent):
     ) -> str:
         """Prompt handler for notification drafting"""
         draft_parts = [
-            f"Notification Draft",
+            "Notification Draft",
             "",
             f"**Event**: {event}",
             f"**Recipient**: {recipient}",
@@ -1795,11 +1792,11 @@ class FirstAgent(BaseAgent):
         event_lower = event.lower()
         
         if "complete" in event_lower or "finished" in event_lower:
-            draft_parts.append(f"✅ Task completed successfully!")
+            draft_parts.append("✅ Task completed successfully!")
             draft_parts.append("")
             draft_parts.append(f"Your task has been completed. {context or 'Please review the results.'}")
         elif "error" in event_lower or "failed" in event_lower:
-            draft_parts.append(f"⚠️ Action encountered an issue")
+            draft_parts.append("⚠️ Action encountered an issue")
             draft_parts.append("")
             draft_parts.append(f"An error occurred: {context or 'Please check the details.'}")
         elif "alert" in event_lower or "warning" in event_lower:
@@ -1834,7 +1831,8 @@ class FirstAgent(BaseAgent):
                 topics_list = json.loads(topics) if topics.startswith("[") else [t.strip() for t in topics.split(",")]
             else:
                 topics_list = topics
-        except:
+        except Exception as e:
+            logger.debug(f"Could not parse topics as JSON, treating as single item. Error: {e}")
             topics_list = [topics] if isinstance(topics, str) else topics
         
         try:
@@ -1842,11 +1840,12 @@ class FirstAgent(BaseAgent):
                 participants_list = json.loads(participants) if participants.startswith("[") else [p.strip() for p in participants.split(",")]
             else:
                 participants_list = participants
-        except:
+        except Exception as e:
+            logger.debug(f"Could not parse participants as JSON, treating as single item. Error: {e}")
             participants_list = [participants] if isinstance(participants, str) else participants
         
         organization_parts = [
-            f"Channel Organization Suggestions",
+            "Channel Organization Suggestions",
             "",
             f"**Topics**: {', '.join(str(t) for t in topics_list)}",
             f"**Participants**: {', '.join(str(p) for p in participants_list)}",
@@ -1857,15 +1856,15 @@ class FirstAgent(BaseAgent):
         
         # Suggest channels based on topics
         if len(topics_list) == 1:
-            organization_parts.append(f"1. **Single Channel Approach**:")
+            organization_parts.append("1. **Single Channel Approach**:")
             organization_parts.append(f"   - Create one channel: '{topics_list[0]}'")
-            organization_parts.append(f"   - Type: Public (if all participants should have access)")
+            organization_parts.append("   - Type: Public (if all participants should have access)")
             organization_parts.append(f"   - Participants: {', '.join(str(p) for p in participants_list)}")
         else:
-            organization_parts.append(f"1. **Multi-Channel Approach**:")
+            organization_parts.append("1. **Multi-Channel Approach**:")
             for i, topic in enumerate(topics_list, 1):
                 organization_parts.append(f"   - Channel {i}: '{topic}'")
-                organization_parts.append(f"     Type: Public")
+                organization_parts.append("     Type: Public")
                 organization_parts.append(f"     Participants: {', '.join(str(p) for p in participants_list)}")
         
         organization_parts.extend([
@@ -2435,7 +2434,7 @@ class FirstAgent(BaseAgent):
         if isinstance(data, str):
             try:
                 parsed_data = json.loads(data)
-            except:
+            except json.JSONDecodeError:
                 parsed_data = data
         else:
             parsed_data = data
@@ -2502,7 +2501,7 @@ class FirstAgent(BaseAgent):
                 try:
                     parsed = json.loads(data)
                     export_data = json.dumps(parsed, indent=2)
-                except:
+                except json.JSONDecodeError:
                     export_data = data
             else:
                 export_data = json.dumps(data, indent=2)
@@ -2590,18 +2589,18 @@ class FirstAgent(BaseAgent):
                 schema_obj = json.loads(schema)
             else:
                 schema_obj = schema
-        except:
+        except json.JSONDecodeError:
             schema_obj = {"schema": schema}
         
         optimization_parts = [
-            f"Query Optimization Analysis",
+            "Query Optimization Analysis",
             "",
-            f"**Original Query**:",
-            f"```sql",
+            "**Original Query**:",
+            "```sql",
             query,
             "```",
             "",
-            f"**Schema Information**:",
+            "**Schema Information**:",
             json.dumps(schema_obj, indent=2),
             "",
         ]
@@ -2977,7 +2976,7 @@ class FirstAgent(BaseAgent):
                 metrics_obj = json.loads(metrics)
             else:
                 metrics_obj = metrics
-        except:
+        except json.JSONDecodeError:
             metrics_obj = {"metrics": metrics}
         
         try:
@@ -2985,15 +2984,16 @@ class FirstAgent(BaseAgent):
                 logs_list = json.loads(logs) if logs.startswith("[") else [logs]
             else:
                 logs_list = logs if isinstance(logs, list) else [logs]
-        except:
+        except Exception as e:
+            logger.debug(f"Could not parse logs as JSON, treating as raw list. Error: {e}")
             logs_list = [logs] if isinstance(logs, str) else logs
         
         analysis_parts = [
-            f"System Diagnostic Analysis",
+            "System Diagnostic Analysis",
             "",
             f"**Symptoms**: {symptoms or 'None provided'}",
             "",
-            f"**System Metrics**:",
+            "**System Metrics**:",
             json.dumps(metrics_obj, indent=2),
             "",
             f"**Recent Logs** ({len(logs_list)} entries):",
@@ -3051,11 +3051,11 @@ class FirstAgent(BaseAgent):
         warning_logs = [log for log in logs_list if isinstance(log, dict) and log.get("level", "").upper() == "WARNING"]
         
         if error_logs:
-            analysis_parts.append(f"")
+            analysis_parts.append("")
             analysis_parts.append(f"⚠️ **Errors Found**: {len(error_logs)} error log entries detected. Review these for issues.")
         
         if warning_logs:
-            analysis_parts.append(f"")
+            analysis_parts.append("")
             analysis_parts.append(f"ℹ️ **Warnings Found**: {len(warning_logs)} warning log entries. Monitor these for potential issues.")
         
         if not error_logs and not warning_logs:

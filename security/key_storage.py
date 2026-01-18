@@ -5,7 +5,6 @@ Provides secure storage for private keys with optional passphrase protection.
 """
 
 import base64
-import hashlib
 import logging
 import os
 from pathlib import Path

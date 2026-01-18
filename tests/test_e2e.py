@@ -5,8 +5,6 @@ Full system integration tests.
 """
 
 import pytest
-import asyncio
-import json
 from crypto import NodeIdentity
 from p2p import P2PNode
 from agents import FirstAgent

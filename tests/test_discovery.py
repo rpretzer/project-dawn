@@ -6,7 +6,6 @@ import pytest
 import asyncio
 import time
 from p2p import Peer, PeerRegistry, BootstrapDiscovery, GossipDiscovery, PeerDiscovery
-from crypto import NodeIdentity
 
 
 class TestPeer:

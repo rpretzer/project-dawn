@@ -7,11 +7,10 @@ Provides comprehensive audit trail for security events.
 import json
 import logging
 import time
-from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 from data_paths import data_root
 

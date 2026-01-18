@@ -8,7 +8,6 @@ import logging
 import os
 from typing import Optional, Tuple
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.backends import default_backend
 
 logger = logging.getLogger(__name__)
 

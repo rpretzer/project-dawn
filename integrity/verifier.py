@@ -124,7 +124,7 @@ class IntegrityVerifier:
         
         # Verify signature
         try:
-            result = subprocess.run(
+            subprocess.run(
                 ["gpg", "--verify", str(signature_file), str(file_path)],
                 check=True,
                 capture_output=True,

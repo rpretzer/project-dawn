@@ -48,7 +48,6 @@ class SecureStorage:
         Returns:
             32-byte encryption key
         """
-        import hashlib
         
         # Try to get master key from environment or file
         master_key_path = self.data_dir / "master_key"

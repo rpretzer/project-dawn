@@ -6,7 +6,7 @@ Tool definition, registration, and execution for MCP protocol.
 
 import logging
 from typing import Any, Dict, List, Optional, Callable, Awaitable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 

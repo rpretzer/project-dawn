@@ -5,7 +5,6 @@ Tests P2P node behavior with multiple peers and complex interaction patterns.
 """
 
 import pytest
-import asyncio
 from crypto import NodeIdentity
 from p2p.p2p_node import P2PNode
 from p2p.peer import Peer

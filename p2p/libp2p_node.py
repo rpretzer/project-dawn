@@ -145,17 +145,8 @@ class Libp2pP2PNode:
     
     async def _announce_agent(self, agent_id: str, server: MCPServer) -> None:
         """Announce agent in DHT"""
-        agent_info = {
-            "node_id": self.node_id,
-            "agent_id": agent_id,
-            "tools": server.tool_registry.list_tools(),
-            "resources": server.resource_registry.list_resources(),
-            "prompts": server.prompt_registry.list_prompts(),
-        }
-        
-        agent_key = f"{self.node_id}:{agent_id}"
-        # Optional: announce via libp2p DHT when discovery is available.
-        logger.debug(f"Announced agent in DHT: {agent_key}")
+        # TODO: Announce agent to DHT
+        pass
     
     async def _announce_agents(self) -> None:
         """Announce all agents in DHT"""

@@ -4,7 +4,6 @@ Authentication and Authorization
 Provides basic authentication and permission management.
 """
 
-import hashlib
 import logging
 import time
 from enum import Enum

@@ -6,7 +6,6 @@ Provides multi-transport support, automatic NAT traversal, and battle-tested pee
 """
 
 import asyncio
-import json
 import logging
 import os
 from typing import Any, Dict, Optional, Callable, Awaitable, List
@@ -291,7 +290,7 @@ class Libp2pTransport:
                     logger.debug(f"Failed to register handler via protocol method: {e}")
             
             if not handler_registered:
-                logger.warning(f"Could not register stream handler - libp2p API may be incompatible")
+                logger.warning("Could not register stream handler - libp2p API may be incompatible")
         
         except Exception as e:
             logger.warning(f"Failed to set up stream handler: {e}")

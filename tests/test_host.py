@@ -4,7 +4,6 @@ import asyncio
 import pytest
 from host import MCPHost, EventBus, Event, EventType
 from mcp.server import MCPServer
-from mcp.client import MCPClient
 from mcp.transport import WEBSOCKETS_AVAILABLE
 
 

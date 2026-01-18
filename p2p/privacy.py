@@ -11,16 +11,15 @@ import asyncio
 import json
 import logging
 import random
-import time
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import os
 
-from crypto import NodeIdentity, MessageEncryptor, KeyExchange
+from crypto import NodeIdentity, KeyExchange
 
 logger = logging.getLogger(__name__)
 
@@ -270,10 +269,8 @@ class OnionRouter:
                         # Both sender and receiver can derive the same key using:
                         # - The hop's public key (known to both)
                         # - The sender's public key (included in message or known)
-                        # - The hop's node ID (for context)
-                        our_node_id = self.identity.get_node_id()
-                        our_public_key = self.identity.serialize_public_key()
-                        
+                                                 # - The hop's node ID (for context)
+                                                our_public_key = self.identity.serialize_public_key()                        
                         # Create shared input: both parties know hop's public key and node ID
                         # Sender uses: hop_public_key + sender_public_key + hop_node_id
                         # Receiver uses: hop_public_key + sender_public_key + hop_node_id (same!)

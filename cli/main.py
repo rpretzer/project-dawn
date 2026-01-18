@@ -5,13 +5,12 @@ Project Dawn - Interactive CLI
 A friendly command-line interface for managing the P2P node, agents, and peers.
 """
 
-import asyncio
 import json
 import logging
-import os
 import sys
+import time
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional
 from datetime import datetime
 
 # Add project root to path
@@ -40,6 +39,7 @@ except ImportError:
 from crypto import NodeIdentity
 from data_paths import data_root
 from health import HealthChecker, HealthStatus
+from cli.server_manager import ensure_server_running
 
 # Setup logging
 logging.basicConfig(
@@ -78,6 +78,11 @@ def print_info(message: str):
 
 def cmd_status(json_output: bool = False):
     """Show node status and health"""
+    # Ensure server is running
+    if not ensure_server_running():
+        print_error("Server is not running and could not be started")
+        sys.exit(1)
+    
     try:
         identity = NodeIdentity()
         node_id = identity.get_node_id()
@@ -91,11 +96,11 @@ def cmd_status(json_output: bool = False):
         try:
             from metrics import get_metrics_collector
             metrics = get_metrics_collector()
-        except:
+        except Exception as e:
+            logger.debug(f"Could not get metrics collector: {e}")
             metrics = None
         
         if json_output:
-            import time
             uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0
             data = {
                 "node_id": node_id,
@@ -117,7 +122,7 @@ def cmd_status(json_output: bool = False):
                 
                 table.add_row("Node ID", node_id[:16] + "...")
                 table.add_row("Health", str(health_status))
-                uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0
+                uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0.0
                 table.add_row("Uptime", f"{uptime:.1f}s")
                 table.add_row("Data Root", str(data_root()))
                 
@@ -129,8 +134,7 @@ def cmd_status(json_output: bool = False):
             else:
                 print(f"Node ID: {node_id}")
                 print(f"Health: {health_status}")
-                import time
-                uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0
+                uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0.0
                 print(f"Uptime: {uptime:.1f}s")
                 print(f"Data Root: {data_root()}")
     
@@ -141,6 +145,11 @@ def cmd_status(json_output: bool = False):
 
 def cmd_peers(json_output: bool = False):
     """List connected peers"""
+    # Ensure server is running
+    if not ensure_server_running():
+        print_error("Server is not running and could not be started")
+        sys.exit(1)
+    
     try:
         from p2p.peer_registry import PeerRegistry
         
@@ -199,6 +208,11 @@ def cmd_peers(json_output: bool = False):
 
 def cmd_agents(json_output: bool = False):
     """List registered agents"""
+    # Ensure server is running
+    if not ensure_server_running():
+        print_error("Server is not running and could not be started")
+        sys.exit(1)
+    
     try:
         from consensus import DistributedAgentRegistry
         
@@ -258,14 +272,18 @@ def cmd_agents(json_output: bool = False):
 
 def cmd_health(json_output: bool = False):
     """Show detailed health information"""
+    # Ensure server is running
+    if not ensure_server_running():
+        print_error("Server is not running and could not be started")
+        sys.exit(1)
+    
     try:
         health_checker = HealthChecker()
         # Get overall health status (default to HEALTHY)
         overall = HealthStatus.HEALTHY
         
         if json_output:
-            import time
-            uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0
+            uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0.0
             data = {
                 "status": overall.value if hasattr(overall, 'value') else str(overall),
                 "uptime": uptime,
@@ -279,8 +297,7 @@ def cmd_health(json_output: bool = False):
                     HealthStatus.UNHEALTHY: "red",
                 }.get(overall, "white")
                 
-                import time
-                uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0
+                uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0.0
                 panel = Panel(
                     f"[{status_color}]{overall}[/{status_color}]\n\n"
                     f"Uptime: {uptime:.1f}s",
@@ -289,8 +306,7 @@ def cmd_health(json_output: bool = False):
                 )
                 console.print(panel)
             else:
-                import time
-                uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0
+                uptime = time.time() - health_checker.start_time if hasattr(health_checker, 'start_time') else 0.0
                 print(f"Status: {overall}")
                 print(f"Uptime: {uptime:.1f}s")
     
@@ -301,6 +317,11 @@ def cmd_health(json_output: bool = False):
 
 def cmd_metrics(json_output: bool = False):
     """Show Prometheus metrics"""
+    # Ensure server is running
+    if not ensure_server_running():
+        print_error("Server is not running and could not be started")
+        sys.exit(1)
+    
     try:
         from prometheus_client import generate_latest, REGISTRY
         
@@ -322,6 +343,11 @@ def cmd_metrics(json_output: bool = False):
 
 def cmd_trust(node_id: Optional[str] = None, level: Optional[str] = None, json_output: bool = False):
     """Manage peer trust levels"""
+    # Ensure server is running
+    if not ensure_server_running():
+        print_error("Server is not running and could not be started")
+        sys.exit(1)
+    
     try:
         from security import TrustManager, TrustLevel
         
@@ -365,74 +391,15 @@ def cmd_trust(node_id: Optional[str] = None, level: Optional[str] = None, json_o
 
 
 def cmd_interactive():
-    """Start interactive mode"""
-    if not console:
-        print("Interactive mode requires 'rich' package. Install with: pip install rich typer")
+    """Start interactive mode (Claude Code-style)"""
+    # Ensure server is running
+    if not ensure_server_running():
+        print_error("Server is not running and could not be started")
         sys.exit(1)
     
-    console.print(Panel.fit(
-        "[bold cyan]Project Dawn[/bold cyan]\n"
-        "[dim]Interactive CLI Mode[/dim]",
-        border_style="cyan"
-    ))
-    
-    console.print("\n[dim]Type 'help' for commands, 'exit' to quit[/dim]\n")
-    
-    while True:
-        try:
-            command = Prompt.ask("[bold cyan]dawn[/bold cyan]").strip()
-            
-            if not command:
-                continue
-            
-            if command.lower() in ['exit', 'quit', 'q']:
-                console.print("[yellow]Goodbye![/yellow]")
-                break
-            
-            if command.lower() == 'help':
-                console.print("\n[bold]Available commands:[/bold]")
-                console.print("  [cyan]status[/cyan]     - Show node status")
-                console.print("  [cyan]peers[/cyan]      - List connected peers")
-                console.print("  [cyan]agents[/cyan]    - List registered agents")
-                console.print("  [cyan]health[/cyan]    - Show health information")
-                console.print("  [cyan]metrics[/cyan]    - Show Prometheus metrics")
-                console.print("  [cyan]trust <node_id>[/cyan] - Check trust level")
-                console.print("  [cyan]exit[/cyan]       - Exit interactive mode")
-                console.print()
-                continue
-            
-            # Parse and execute command
-            parts = command.split()
-            cmd = parts[0].lower()
-            args = parts[1:]
-            
-            # Execute commands
-            if cmd == 'status':
-                cmd_status(json_output=False)
-            elif cmd == 'peers':
-                cmd_peers(json_output=False)
-            elif cmd == 'agents':
-                cmd_agents(json_output=False)
-            elif cmd == 'health':
-                cmd_health(json_output=False)
-            elif cmd == 'metrics':
-                cmd_metrics(json_output=False)
-            elif cmd == 'trust':
-                if len(args) > 0:
-                    node_id = args[0]
-                    level = args[2] if len(args) > 2 and args[1] == '--set' else None
-                    cmd_trust(node_id, level, json_output=False)
-                else:
-                    print_info("Usage: trust <node_id> [--set <level>]")
-            else:
-                console.print(f"[red]Unknown command: {cmd}[/red]")
-                console.print("[dim]Type 'help' for available commands[/dim]")
-        
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Goodbye![/yellow]")
-            break
-        except Exception as e:
-            print_error(f"Error: {e}")
+    # Use Claude Code-style interface
+    from cli.interactive import run_interactive
+    run_interactive()
 
 
 # Create typer app and register commands if available
@@ -485,8 +452,28 @@ if TYPER_AVAILABLE:
     
     @app.command()
     def interactive():
-        """Start interactive mode"""
+        """Start interactive mode (Claude Code-style)"""
         cmd_interactive()
+    
+    @app.command()
+    def dashboard(
+        port: int = typer.Option(8080, "--port", "-p", help="Dashboard port"),
+        open_browser: bool = typer.Option(True, "--open/--no-open", help="Open in browser"),
+    ):
+        """Open the web dashboard"""
+        from cli.interactive import open_dashboard
+        
+        # Ensure server is running
+        if not ensure_server_running():
+            print_error("Server is not running and could not be started")
+            sys.exit(1)
+        
+        if open_browser:
+            print_success(f"Opening dashboard at http://localhost:{port}")
+            open_dashboard(port)
+        else:
+            print_info(f"Dashboard available at http://localhost:{port}")
+            print_info("Open this URL in your browser")
     
     def main():
         """Main entry point"""
@@ -532,6 +519,22 @@ else:
             cmd_trust(node_id, level, json_flag)
         elif cmd == "interactive":
             cmd_interactive()
+        elif cmd == "dashboard" or cmd == "web" or cmd == "ui":
+            from cli.interactive import launch_dashboard
+            launch_dashboard()
+        elif cmd == "start":
+            # Start server command
+            from cli.server_manager import start_server, is_server_running
+            if is_server_running():
+                print("Server is already running")
+            else:
+                print("Starting server...")
+                process = start_server(background=True)
+                if process:
+                    print("Server started in background")
+                else:
+                    print("Failed to start server")
+                    sys.exit(1)
         else:
             print(f"Unknown command: {cmd}")
             sys.exit(1)

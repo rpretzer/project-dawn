@@ -3,7 +3,6 @@ Tests for DHT (Distributed Hash Table) implementation
 """
 
 import pytest
-import asyncio
 from crypto import NodeIdentity
 from p2p.dht import DHT, DHTNode, KBucket
 

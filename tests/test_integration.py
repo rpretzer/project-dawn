@@ -5,10 +5,8 @@ End-to-end tests for the decentralized P2P system.
 """
 
 import pytest
-import asyncio
-import time
 from crypto import NodeIdentity
-from p2p import P2PNode, Peer
+from p2p import P2PNode
 from agents import FirstAgent
 from consensus import DistributedAgentRegistry
 

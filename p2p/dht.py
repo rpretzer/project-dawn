@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 from crypto import NodeIdentity
-from .peer import Peer
 
 logger = logging.getLogger(__name__)
 

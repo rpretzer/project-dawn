@@ -25,3 +25,6 @@ PyYAML>=6.0
 # CLI (optional, for interactive CLI)
 rich>=13.0.0
 typer>=0.9.0
+
+# Server management (optional, for process management)
+psutil>=5.9.0

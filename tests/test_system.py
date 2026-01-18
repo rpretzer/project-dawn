@@ -5,11 +5,10 @@ Tests for complete system functionality.
 """
 
 import pytest
-import asyncio
 from crypto import NodeIdentity
 from p2p import P2PNode, Peer
 from agents import FirstAgent
-from consensus import DistributedAgentRegistry, CRDTMap
+from consensus import DistributedAgentRegistry
 
 
 class TestSystemComponents:

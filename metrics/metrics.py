@@ -5,8 +5,7 @@ Provides metrics collection for Project Dawn using Prometheus.
 """
 
 import logging
-import time
-from typing import Optional, Dict, Any
+from typing import Optional
 
 try:
     from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST

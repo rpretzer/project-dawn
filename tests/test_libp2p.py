@@ -2,11 +2,10 @@
 Tests for Libp2p transport implementation
 """
 
-import asyncio
 import pytest
 import os
 from crypto import NodeIdentity
-from p2p.libp2p_transport import Libp2pTransport, LIBP2P_ENABLED, LIBP2P_AVAILABLE
+from p2p.libp2p_transport import Libp2pTransport
 
 
 @pytest.mark.asyncio
@@ -19,7 +18,6 @@ async def test_libp2p_import():
         pytest.skip("Libp2p not enabled (set LIBP2P_ENABLED=true)")
     
     # Try to import
-    from p2p.libp2p_transport import Libp2pTransport
     from p2p.libp2p_impl import PY_LIBP2P_AVAILABLE
     
     if not PY_LIBP2P_AVAILABLE:

@@ -4,7 +4,6 @@ Configuration Management
 Provides YAML-based configuration with environment variable overrides.
 """
 
-import json
 import logging
 import os
 from pathlib import Path

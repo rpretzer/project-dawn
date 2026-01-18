@@ -10,7 +10,7 @@ import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Dict, Any
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 from metrics import register_metrics, get_metrics_collector
 from health import HealthChecker, HealthStatus

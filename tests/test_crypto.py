@@ -13,7 +13,6 @@ from crypto import (
     create_encrypted_message,
     decrypt_message,
     perform_key_exchange,
-    generate_random_bytes,
     hash_bytes,
     hash_string,
     constant_time_compare,

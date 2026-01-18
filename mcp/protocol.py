@@ -5,7 +5,6 @@ Base protocol for MCP (Model Context Protocol).
 Specification: https://www.jsonrpc.org/specification
 """
 
-import asyncio
 import inspect
 import json
 import uuid

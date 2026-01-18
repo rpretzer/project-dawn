@@ -92,22 +92,52 @@ dawn trust <node_id> --set TRUSTED
 # Available levels: UNTRUSTED, UNKNOWN, VERIFIED, TRUSTED, BOOTSTRAP
 ```
 
+#### Start Server
+
+Start the Project Dawn server:
+
+```bash
+# Start in background (default)
+dawn start
+
+# Start in foreground
+dawn start --foreground
+```
+
 #### Interactive Mode
 
-Start an interactive CLI session:
+Start an interactive CLI session (Claude Code-style):
 
 ```bash
 dawn interactive
 ```
 
+The CLI will automatically ensure the server is running before executing commands. If the server is not running, it will start it automatically.
+
 In interactive mode, you can type commands directly:
 
 ```
-dawn> status
-dawn> peers
-dawn> agents
-dawn> help
-dawn> exit
+dawn → status
+dawn → peers
+dawn → agents
+dawn → dashboard
+dawn → help
+dawn → exit
+```
+
+#### Dashboard
+
+Open the web dashboard in your browser:
+
+```bash
+# Open dashboard (default port 8080)
+dawn dashboard
+
+# Open dashboard on custom port
+dawn dashboard --port 8080
+
+# Show URL without opening browser
+dawn dashboard --no-open
 ```
 
 ### Examples
@@ -131,6 +161,7 @@ dawn interactive
 - **Rich Terminal Output**: Beautiful, colored output using the `rich` library
 - **JSON Support**: All commands support `--json` flag for machine-readable output
 - **Interactive Mode**: Friendly interactive session for quick commands
+- **Auto Server Management**: Automatically ensures server is running before commands
 - **Status Monitoring**: Check node health, peers, and agents
 - **Trust Management**: Manage peer trust levels
 - **Metrics**: View Prometheus metrics
