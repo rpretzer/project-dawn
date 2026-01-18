@@ -27,4 +27,4 @@ rich>=13.0.0
 typer>=0.9.0
 
 # Server management (optional, for process management)
-psutil>=5.9.0
+psutil>=5.9.0docker>=6.1.0

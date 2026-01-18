@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fnmatch import fnmatch
 from .base_agent import BaseAgent
+from security.sandbox import SandboxManager
 from mcp.resources import MCPResource
 from mcp.prompts import MCPPrompt, MCPPromptArgument
 
@@ -43,6 +44,9 @@ class CodeAgent(BaseAgent):
         
         # Security: restrict operations to workspace
         self.allowed_paths = [self.workspace_path]
+        
+        # Initialize sandbox manager for secure code execution
+        self.sandbox = SandboxManager()
         
         # Code execution sandbox settings
         self.execution_timeout = 30.0  # seconds
@@ -822,6 +826,19 @@ class CodeAgent(BaseAgent):
         Returns:
             Execution result (stdout, stderr, return code)
         """
+        # Try to use Docker sandbox first
+        if self.sandbox.is_available():
+            logger.info(f"Executing {language} code in Docker sandbox")
+            result = self.sandbox.execute_code(code, language, timeout)
+            
+            # Add language to result if success
+            if result.get("success") or "stdout" in result:
+                result["language"] = language
+                
+            return result
+            
+        # Fallback to local execution (less secure)
+        logger.warning(f"Docker sandbox unavailable, falling back to local execution for {language}")
         try:
             if language == "python":
                 result = subprocess.run(
@@ -858,7 +875,7 @@ class CodeAgent(BaseAgent):
             stderr = result.stderr[:self.max_output_size]
             
             return {
-                "success": True,
+                "success": result.returncode == 0,
                 "stdout": stdout,
                 "stderr": stderr,
                 "return_code": result.returncode,
