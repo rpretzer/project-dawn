@@ -14,7 +14,7 @@ class TestTaskManager:
     
     def test_create_task(self):
         """Test task creation"""
-        manager = TaskManager()
+        manager = TaskManager(persist=False)
         task = manager.create_task("Test Task", "Test description", priority=3)
         
         assert task.task_id is not None
@@ -25,7 +25,7 @@ class TestTaskManager:
     
     def test_list_tasks(self):
         """Test task listing"""
-        manager = TaskManager()
+        manager = TaskManager(persist=False)
         task1 = manager.create_task("Task 1", "Desc 1", priority=1)
         task2 = manager.create_task("Task 2", "Desc 2", priority=5)
         task3 = manager.create_task("Task 3", "Desc 3", assignee="agent1", priority=3)
@@ -41,7 +41,7 @@ class TestTaskManager:
     
     def test_assign_task(self):
         """Test task assignment"""
-        manager = TaskManager()
+        manager = TaskManager(persist=False)
         task = manager.create_task("Test", "Desc")
         
         assert manager.assign_task(task.task_id, "agent1")
@@ -50,7 +50,7 @@ class TestTaskManager:
     
     def test_complete_task(self):
         """Test task completion"""
-        manager = TaskManager()
+        manager = TaskManager(persist=False)
         task = manager.create_task("Test", "Desc", assignee="agent1")
         manager.assign_task(task.task_id, "agent1")
         manager.start_task(task.task_id)

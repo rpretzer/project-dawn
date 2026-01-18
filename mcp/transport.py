@@ -414,20 +414,26 @@ class WebSocketServer:
             
             # Try to get bound port from sockets
             try:
-                # Check server.sockets (websockets 14+)
-                sockets = getattr(server, "sockets", [])
-                if sockets:
-                    for s in sockets:
-                        self.bound_port = s.getsockname()[1]
-                        break
+                # Debug logging to see what's actually happening
+                logger.debug(f"Server type: {type(server)}")
                 
-                # Check underlying asyncio server if needed
-                if self.bound_port is None and hasattr(server, "server") and server.server:
-                    sockets = getattr(server.server, "sockets", [])
-                    if sockets:
+                # Check for sockets attribute directly
+                sockets = getattr(server, 'sockets', None)
+                if sockets:
+                    # In newer websockets, sockets is a tuple/list
+                    if isinstance(sockets, (list, tuple)):
+                        self.bound_port = sockets[0].getsockname()[1]
+                    elif hasattr(sockets, '__iter__'):
+                        # If it's a set or other iterable
                         for s in sockets:
                             self.bound_port = s.getsockname()[1]
                             break
+                
+                # Fallback to checking the underlying server object if it exists
+                if self.bound_port is None and hasattr(server, 'server'):
+                    inner_server = server.server
+                    if hasattr(inner_server, 'sockets') and inner_server.sockets:
+                        self.bound_port = inner_server.sockets[0].getsockname()[1]
             except Exception as e:
                 logger.warning(f"Could not determine bound port: {e}")
                 
