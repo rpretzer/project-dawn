@@ -248,6 +248,17 @@ class CoordinationAgent(BaseAgent):
             handler=self._task_queue_resource,
         )
         
+        # Resource 4: agent://api-reference
+        self.server.register_resource(
+            resource=MCPResource(
+                uri="agent://api-reference",
+                name="API Reference",
+                description="Comprehensive reference of all tools and capabilities in the system",
+                mimeType="text/markdown",
+            ),
+            handler=self._api_reference_resource,
+        )
+        
         # Register Phase 2: Network Awareness resources
         self._register_network_resources()
         
@@ -656,6 +667,13 @@ class CoordinationAgent(BaseAgent):
             "stats": stats,
             "timestamp": time.time(),
         }, indent=2)
+    
+    async def _api_reference_resource(self) -> str:
+        """Resource handler for API reference"""
+        ref_path = Path(__file__).parent.parent / "API_REFERENCE.md"
+        if ref_path.exists():
+            return ref_path.read_text(encoding="utf-8")
+        return "API Reference not found. Run scripts/generate_api_docs.py to generate it."
     
     # Prompt Handlers
     
