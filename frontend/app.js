@@ -3,6 +3,8 @@
  * Clean chat interface with Simple/Advanced mode toggle
  */
 
+import { Dashboard } from './dashboard.js';
+
 class WebSocketClient {
     constructor() {
         this.ws = null;
@@ -113,6 +115,7 @@ class App {
         this.theme = localStorage.getItem('dawn_theme') || 'light';
         this.agentId = 'agent1';
         this.selectedItem = null;
+        this.dashboard = new Dashboard(this.ws);
 
         this.init();
     }
@@ -166,6 +169,12 @@ class App {
         if (this.mode === 'advanced') {
             this.loadInventory();
             this.loadLLMConfig();
+            
+            // Refresh dashboard if active
+            const activeTab = document.querySelector('.tab-btn.active')?.dataset.tab;
+            if (activeTab === 'dashboard') {
+                this.dashboard.refresh();
+            }
         }
     }
 
@@ -366,7 +375,13 @@ class App {
                 document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
                 document.getElementById(`${tab}-panel`)?.classList.add('active');
 
-                this.clearDetail();
+                // Dashboard lifecycle
+                if (tab === 'dashboard') {
+                    this.dashboard.mount('dashboard-panel');
+                } else {
+                    this.dashboard.unmount();
+                    this.clearDetail();
+                }
             });
         });
     }
