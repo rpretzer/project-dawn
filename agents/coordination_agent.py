@@ -37,8 +37,8 @@ class CoordinationAgent(BaseAgent):
         super().__init__(agent_id, name or "CoordinationAgent")
         self.p2p_node = p2p_node
         
-        # Initialize task manager
-        self.task_manager = TaskManager()
+        # Initialize task manager with distributed sync
+        self.task_manager = TaskManager(distributed_registry=getattr(p2p_node, 'task_registry', None))
         
         # Chat rooms: room_id -> {participants: [], messages: [], created_at: float}
         self.chat_rooms: Dict[str, Dict[str, Any]] = {}

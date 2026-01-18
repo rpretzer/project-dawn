@@ -20,6 +20,7 @@ from .peer_registry import PeerRegistry
 from .discovery import PeerDiscovery
 from .privacy import PrivacyLayer
 from consensus import DistributedAgentRegistry
+from consensus.task_registry import DistributedTaskRegistry
 from llm.config import load_config, save_config
 from llm.ollama import list_models_async, chat_async
 from security import TrustManager, PeerValidator, AuthManager, Permission, AuditLogger, AuditEventType
@@ -83,8 +84,9 @@ class P2PNode:
         # Coordination agent reference (for chat rooms and tasks)
         self.coordination_agent: Optional[Any] = None
         
-        # Distributed agent registry
+        # Distributed registries
         self.agent_registry = DistributedAgentRegistry(self.node_id)
+        self.task_registry = DistributedTaskRegistry(self.node_id)
         
         # Security: Trust, authentication, and audit logging
         self.audit_logger = AuditLogger()
@@ -389,6 +391,13 @@ class P2PNode:
                 # Sync agent registry if CRDT state is present
                 if "agent_registry" in data and hasattr(self, 'agent_registry'):
                     self.agent_registry.sync_from_crdt(data["agent_registry"])
+                
+                # Sync task registry if CRDT state is present
+                if "task_registry" in data and hasattr(self, 'task_registry'):
+                    self.task_registry.sync_from_crdt(data["task_registry"])
+                    # Trigger local task manager sync if coordination agent is present
+                    if self.coordination_agent and hasattr(self.coordination_agent, 'task_manager'):
+                        self.coordination_agent.task_manager.sync_from_distributed()
                 return
             
             # Check if it's a response to our request
@@ -1057,6 +1066,10 @@ class P2PNode:
         # Enrich with agent registry CRDT state for synchronization
         if hasattr(self, 'agent_registry'):
             announcement["agent_registry"] = self.agent_registry.get_crdt_state()
+            
+        # Enrich with task registry CRDT state for synchronization
+        if hasattr(self, 'task_registry'):
+            announcement["task_registry"] = self.task_registry.get_crdt_state()
             
         message = json.dumps(announcement)
         

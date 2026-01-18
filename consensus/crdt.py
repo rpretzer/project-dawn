@@ -108,6 +108,10 @@ class CRDTMap:
         """Get all key-value pairs"""
         return [(k, v.value) for k, v in self.entries.items()]
     
+    def get_all(self) -> Dict[str, Any]:
+        """Get all key-value pairs as a dictionary"""
+        return {k: v.value for k, v in self.entries.items()}
+    
     def merge(self, other_state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Merge with another CRDT state

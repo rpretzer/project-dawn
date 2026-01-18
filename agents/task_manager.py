@@ -87,16 +87,18 @@ class TaskManager:
     Manages tasks across the network, tracking assignments and progress.
     """
     
-    def __init__(self, data_dir: Optional[Path] = None, persist: bool = True):
+    def __init__(self, data_dir: Optional[Path] = None, persist: bool = True, distributed_registry: Any = None):
         """
         Initialize task manager
         
         Args:
             data_dir: Data directory for persistence (defaults to data_root/agents/tasks)
             persist: Enable persistence (default True)
+            distributed_registry: Optional DistributedTaskRegistry for network sync
         """
         self.tasks: Dict[str, Task] = {}  # task_id -> Task
         self.persist = persist
+        self.distributed_registry = distributed_registry
         self.data_dir = data_dir or data_root() / "agents" / "tasks"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.tasks_path = self.data_dir / "tasks.json"
@@ -136,8 +138,27 @@ class TaskManager:
             tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
             tmp_path.replace(self.tasks_path)
             logger.debug(f"Saved {len(self.tasks)} tasks to {self.tasks_path}")
+            
+            # Sync to distributed registry if available
+            if self.distributed_registry:
+                for task in self.tasks.values():
+                    self.distributed_registry.update_task(task.to_dict())
         except Exception as e:
             logger.error(f"Failed to save tasks: {e}")
+
+    def sync_from_distributed(self) -> None:
+        """Sync local task state from the distributed registry"""
+        if not self.distributed_registry:
+            return
+            
+        distributed_tasks = self.distributed_registry.list_tasks()
+        for task_dict in distributed_tasks:
+            task_id = task_dict["task_id"]
+            # Only update if distributed task is newer than local (simple check)
+            if task_id not in self.tasks or task_dict.get("updated_at", 0) > self.tasks[task_id].updated_at:
+                self.tasks[task_id] = Task.from_dict(task_dict)
+        
+        logger.debug(f"Synced {len(distributed_tasks)} tasks from distributed registry")
 
     def clear(self) -> None:
         """Clear all tasks"""
