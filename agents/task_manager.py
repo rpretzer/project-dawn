@@ -4,12 +4,16 @@ Task Management System
 Manages tasks for agent coordination and collaboration.
 """
 
+import json
 import logging
 import time
 import uuid
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
+
+from data_paths import data_root
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +87,63 @@ class TaskManager:
     Manages tasks across the network, tracking assignments and progress.
     """
     
-    def __init__(self):
-        """Initialize task manager"""
+    def __init__(self, data_dir: Optional[Path] = None, persist: bool = True):
+        """
+        Initialize task manager
+        
+        Args:
+            data_dir: Data directory for persistence (defaults to data_root/agents/tasks)
+            persist: Enable persistence (default True)
+        """
         self.tasks: Dict[str, Task] = {}  # task_id -> Task
-        self.task_counter = 0
-        logger.info("TaskManager initialized")
+        self.persist = persist
+        self.data_dir = data_dir or data_root() / "agents" / "tasks"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.tasks_path = self.data_dir / "tasks.json"
+        
+        # Load persisted tasks
+        if self.persist:
+            self._load()
+            
+        logger.info(f"TaskManager initialized with {len(self.tasks)} tasks")
+    
+    def _load(self) -> None:
+        """Load tasks from disk"""
+        if not self.tasks_path.exists():
+            return
+        
+        try:
+            data = json.loads(self.tasks_path.read_text(encoding="utf-8"))
+            for item in data.get("tasks", []):
+                task = Task.from_dict(item)
+                self.tasks[task.task_id] = task
+            logger.debug(f"Loaded {len(self.tasks)} tasks from {self.tasks_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load tasks: {e}")
+
+    def _save(self) -> None:
+        """Save tasks to disk (atomic write)"""
+        if not self.persist:
+            return
+            
+        try:
+            data = {
+                "version": 1,
+                "tasks": [task.to_dict() for task in self.tasks.values()],
+                "updated_at": time.time()
+            }
+            tmp_path = self.tasks_path.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            tmp_path.replace(self.tasks_path)
+            logger.debug(f"Saved {len(self.tasks)} tasks to {self.tasks_path}")
+        except Exception as e:
+            logger.error(f"Failed to save tasks: {e}")
+
+    def clear(self) -> None:
+        """Clear all tasks"""
+        self.tasks.clear()
+        self._save()
+        logger.info("Task manager cleared")
     
     def create_task(
         self,
@@ -133,7 +189,7 @@ class TaskManager:
         )
         
         self.tasks[task_id] = task
-        self.task_counter += 1
+        self._save()
         
         logger.info(f"Created task: {task_id} - {title} (priority: {priority})")
         return task
@@ -204,6 +260,7 @@ class TaskManager:
         task.assignee = agent_id
         task.status = TaskStatus.ASSIGNED
         task.updated_at = time.time()
+        self._save()
         
         logger.info(f"Assigned task {task_id} to {agent_id}")
         return True
@@ -230,6 +287,7 @@ class TaskManager:
         task.status = TaskStatus.IN_PROGRESS
         task.started_at = time.time()
         task.updated_at = time.time()
+        self._save()
         
         logger.info(f"Started task {task_id}")
         return True
@@ -257,6 +315,7 @@ class TaskManager:
         if result:
             task.metadata["result"] = result
         
+        self._save()
         logger.info(f"Completed task {task_id}")
         return True
     
@@ -282,6 +341,7 @@ class TaskManager:
         if error:
             task.metadata["error"] = error
         
+        self._save()
         logger.warning(f"Task {task_id} failed: {error}")
         return True
     
@@ -306,6 +366,7 @@ class TaskManager:
         
         task.status = TaskStatus.CANCELLED
         task.updated_at = time.time()
+        self._save()
         
         logger.info(f"Cancelled task {task_id}")
         return True
