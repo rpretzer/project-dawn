@@ -411,9 +411,26 @@ class WebSocketServer:
         
         async with ws_serve(handler, host, port, **kwargs) as server:
             self.server = server
-            sockets = getattr(server, "sockets", None)
-            if sockets:
-                self.bound_port = sockets[0].getsockname()[1]
+            
+            # Try to get bound port from sockets
+            try:
+                # Check server.sockets (websockets 14+)
+                sockets = getattr(server, "sockets", [])
+                if sockets:
+                    for s in sockets:
+                        self.bound_port = s.getsockname()[1]
+                        break
+                
+                # Check underlying asyncio server if needed
+                if self.bound_port is None and hasattr(server, "server") and server.server:
+                    sockets = getattr(server.server, "sockets", [])
+                    if sockets:
+                        for s in sockets:
+                            self.bound_port = s.getsockname()[1]
+                            break
+            except Exception as e:
+                logger.warning(f"Could not determine bound port: {e}")
+                
             self._started_event.set()
             logger.info(f"WebSocket server running on ws://{host}:{self.bound_port or port}")
             await self._stop_event.wait()

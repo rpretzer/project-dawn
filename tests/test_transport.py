@@ -33,12 +33,12 @@ async def test_websocket_server_client():
         received_messages.append((client_id, message))
         return message
     
-    # Start server
+    # Start server with port 0 to let OS choose
     server = WebSocketServer(message_handler=handle_message)
     host = "127.0.0.1"
-    port = _free_port()
-    server_task = asyncio.create_task(server.start(host=host, port=port))
+    server_task = asyncio.create_task(server.start(host=host, port=0))
     await server.wait_started(timeout=1.0)
+    port = server.bound_port
     
     try:
         # Connect client
@@ -52,7 +52,7 @@ async def test_websocket_server_client():
         client_task = asyncio.create_task(client.connect(f"ws://{host}:{port}"))
         
         # Wait for connection
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
         
         # Send message from client
         test_message = '{"jsonrpc":"2.0","method":"test","params":{},"id":1}'
@@ -106,9 +106,9 @@ async def test_websocket_broadcast():
     
     server = WebSocketServer()
     host = "127.0.0.1"
-    port = _free_port()
-    server_task = asyncio.create_task(server.start(host=host, port=port))
+    server_task = asyncio.create_task(server.start(host=host, port=0))
     await server.wait_started(timeout=1.0)
+    port = server.bound_port
     
     try:
         # Connect multiple clients
@@ -128,10 +128,10 @@ async def test_websocket_broadcast():
             )
             task = asyncio.create_task(client.connect(f"ws://{host}:{port}"))
             clients.append((client, task))
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
         
         # Wait for connections
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.5)
         
         # Broadcast message
         test_message = '{"jsonrpc":"2.0","method":"broadcast","params":{},"id":1}'

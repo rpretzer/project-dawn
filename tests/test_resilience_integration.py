@@ -45,10 +45,9 @@ async def test_rate_limiting_in_message_routing():
     result = await node._route_message(message, sender_node_id="test_peer")
     assert result is not None
     assert "error" in result
-    assert result["error"]["code"] == -32000
+    assert result["error"]["code"] == -32005
     assert "rate limit" in result["error"]["message"].lower()
-
-
+    
 @pytest.mark.asyncio
 async def test_circuit_breaker_per_peer():
     """Test that circuit breaker prevents connection attempts when open"""

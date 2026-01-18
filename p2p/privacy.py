@@ -269,8 +269,9 @@ class OnionRouter:
                         # Both sender and receiver can derive the same key using:
                         # - The hop's public key (known to both)
                         # - The sender's public key (included in message or known)
-                                                 # - The hop's node ID (for context)
-                                                our_public_key = self.identity.serialize_public_key()                        
+                        # - The hop's node ID (for context)
+                        our_public_key = self.identity.serialize_public_key()
+                        
                         # Create shared input: both parties know hop's public key and node ID
                         # Sender uses: hop_public_key + sender_public_key + hop_node_id
                         # Receiver uses: hop_public_key + sender_public_key + hop_node_id (same!)

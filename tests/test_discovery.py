@@ -100,7 +100,7 @@ class TestPeerRegistry:
     
     def test_add_peer(self):
         """Test adding peer to registry"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         
         peer = Peer(
             node_id="test_node",
@@ -113,7 +113,7 @@ class TestPeerRegistry:
     
     def test_remove_peer(self):
         """Test removing peer from registry"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         
         peer = Peer(node_id="test_node", address="ws://localhost:8000")
         registry.add_peer(peer)
@@ -125,7 +125,7 @@ class TestPeerRegistry:
     
     def test_list_peers(self):
         """Test listing peers"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         
         peer1 = Peer(node_id="node1", address="ws://localhost:8000")
         peer2 = Peer(node_id="node2", address="ws://localhost:8001")
@@ -138,7 +138,7 @@ class TestPeerRegistry:
     
     def test_list_alive_peers(self):
         """Test listing alive peers"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         
         peer1 = Peer(node_id="node1", address="ws://localhost:8000")
         peer2 = Peer(node_id="node2", address="ws://localhost:8001")
@@ -153,7 +153,7 @@ class TestPeerRegistry:
     
     def test_cleanup_dead_peers(self):
         """Test cleaning up dead peers"""
-        registry = PeerRegistry(peer_timeout=1.0)
+        registry = PeerRegistry(peer_timeout=1.0, persist=False)
         
         peer1 = Peer(node_id="node1", address="ws://localhost:8000")
         peer2 = Peer(node_id="node2", address="ws://localhost:8001")
@@ -169,7 +169,7 @@ class TestPeerRegistry:
     
     def test_peer_stats(self):
         """Test peer registry statistics"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         
         peer1 = Peer(node_id="node1", address="ws://localhost:8000")
         peer2 = Peer(node_id="node2", address="ws://localhost:8001")
@@ -188,7 +188,7 @@ class TestBootstrapDiscovery:
     @pytest.mark.asyncio
     async def test_discover(self):
         """Test bootstrap discovery"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         bootstrap = BootstrapDiscovery(
             bootstrap_nodes=["ws://bootstrap1:8000", "ws://bootstrap2:8000"],
             peer_registry=registry
@@ -206,7 +206,7 @@ class TestGossipDiscovery:
     
     def test_create_announcement(self):
         """Test creating gossip announcement"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         gossip = GossipDiscovery(registry)
         
         # Add some peers
@@ -224,7 +224,7 @@ class TestGossipDiscovery:
     
     def test_handle_announcement(self):
         """Test handling gossip announcement"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         gossip = GossipDiscovery(registry)
         
         # Create announcement
@@ -259,7 +259,7 @@ class TestGossipDiscovery:
     @pytest.mark.asyncio
     async def test_announce_loop(self):
         """Test announcement loop"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         gossip = GossipDiscovery(registry, announce_interval=0.1)
         
         announcements = []
@@ -283,7 +283,7 @@ class TestPeerDiscovery:
     
     def test_initialization(self):
         """Test PeerDiscovery initialization"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         discovery = PeerDiscovery(
             registry,
             bootstrap_nodes=["ws://bootstrap:8000"],
@@ -297,7 +297,7 @@ class TestPeerDiscovery:
     @pytest.mark.asyncio
     async def test_bootstrap_discovery(self):
         """Test bootstrap discovery"""
-        registry = PeerRegistry()
+        registry = PeerRegistry(persist=False)
         discovery = PeerDiscovery(
             registry,
             bootstrap_nodes=["ws://bootstrap1:8000"],

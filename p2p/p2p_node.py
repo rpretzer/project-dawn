@@ -124,8 +124,7 @@ class P2PNode:
         # Resilience: Circuit breakers and rate limiters
         self.cb_config = CircuitBreakerConfig()
         self.circuit_breakers: Dict[str, CircuitBreaker] = {}
-        self.rl_config = RateLimitConfig()
-        self.peer_rate_limiters: Dict[str, RateLimiter] = {}
+        self.rate_limiter = RateLimiter(default_config=RateLimitConfig())
         
         # Track start time for uptime calculation
         self.start_time: Optional[float] = None
@@ -384,6 +383,14 @@ class P2PNode:
             # Parse JSON-RPC message
             data = json.loads(message)
             
+            # If it's a gossip announcement, process it
+            if data.get("type") == "gossip_announcement":
+                self.discovery.handle_gossip_announcement(data, sender_node_id)
+                # Sync agent registry if CRDT state is present
+                if "agent_registry" in data and hasattr(self, 'agent_registry'):
+                    self.agent_registry.sync_from_crdt(data["agent_registry"])
+                return
+            
             # Check if it's a response to our request
             if "id" in data and "result" in data:
                 request_id = str(data["id"])
@@ -435,11 +442,7 @@ class P2PNode:
         try:
             # Rate limit check for peer messages
             if sender_node_id and sender_node_id != self.node_id:
-                limiter = self.peer_rate_limiters.get(sender_node_id)
-                if not limiter:
-                    limiter = RateLimiter(default_config=self.rl_config)
-                    self.peer_rate_limiters[sender_node_id] = limiter
-                limiter.allow(sender_node_id)
+                self.rate_limiter.allow(sender_node_id)
 
             # Authorization check for peer messages
             if sender_node_id and sender_node_id != self.node_id:
@@ -1051,6 +1054,10 @@ class P2PNode:
     
     async def _broadcast_gossip_announcement(self, announcement: Dict[str, Any]) -> None:
         """Broadcast gossip announcement to connected peers"""
+        # Enrich with agent registry CRDT state for synchronization
+        if hasattr(self, 'agent_registry'):
+            announcement["agent_registry"] = self.agent_registry.get_crdt_state()
+            
         message = json.dumps(announcement)
         
         for node_id, transport in list(self.peer_connections.items()):
@@ -1091,27 +1098,42 @@ class P2PNode:
     
     async def call_agent(
         self,
-        target: str,  # Format: "node_id:agent_id" or "agent_id" (local)
-        method: str,
+        target: Optional[str] = None,  # Format: "node_id:agent_id" or "agent_id" (local)
+        method: str = "",
         params: Optional[Dict[str, Any]] = None,
+        node_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Call an agent method
         
         Args:
-            target: Agent target (node_id:agent_id or agent_id for local)
+            target: Agent target string (optional if node_id/agent_id provided)
             method: Method name
             params: Method parameters
+            node_id: Target node ID (optional)
+            agent_id: Target agent ID (optional)
             
         Returns:
             Response from agent
         """
-        # Parse target
-        if ":" in target:
-            node_id, agent_id = target.split(":", 1)
+        # Resolve node_id and agent_id
+        if node_id and agent_id:
+            pass  # Already have both
+        elif target:
+            if ":" in target:
+                node_id, agent_id = target.split(":", 1)
+            else:
+                node_id = self.node_id
+                agent_id = target
         else:
-            node_id = self.node_id
-            agent_id = target
+            return {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32602,
+                    "message": "Target or node_id/agent_id required",
+                }
+            }
         
         # Create request
         request = {

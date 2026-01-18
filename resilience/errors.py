@@ -100,6 +100,7 @@ class RateLimitError(ResilienceError):
         details: Optional[Dict[str, Any]] = None,
         original_error: Optional[Exception] = None,
     ):
+        self.retry_after = retry_after
         details = details or {}
         if retry_after is not None:
             details["retry_after"] = retry_after
@@ -120,6 +121,7 @@ class CircuitBreakerOpenError(ResilienceError):
         retry_after: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None,
     ):
+        self.retry_after = retry_after
         details = details or {}
         if retry_after is not None:
             details["retry_after"] = retry_after

@@ -165,7 +165,12 @@ async def main():
     logger.info(f"Frontend config: WebSocket URL = {ws_url}, HTTP URL = http://{host}:{http_port}")
     
     # Initialize metrics
-    register_metrics()
+    metrics_collector = register_metrics()
+    
+    # Initialize and start AlertManager
+    from metrics import AlertManager
+    alert_manager = AlertManager(metrics_collector)
+    alert_manager.start(interval=30.0)  # Check every 30 seconds
     
     # Initialize health checker
     health_checker = HealthChecker()
@@ -219,6 +224,8 @@ async def main():
             orchestrator.stop()
         if orchestrator_task:
             await orchestrator_task
+        if alert_manager:
+            alert_manager.stop()
         api_server.stop()
         web_server.stop()
         await node.stop()

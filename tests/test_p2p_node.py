@@ -123,6 +123,8 @@ class TestP2PNode:
         """Test integration with peer registry"""
         identity = NodeIdentity()
         node = P2PNode(identity)
+        node.peer_registry.persist = False
+        node.peer_registry.clear()
         
         # Add peer to registry
         peer = Peer(node_id="peer1", address="ws://peer1:8000")

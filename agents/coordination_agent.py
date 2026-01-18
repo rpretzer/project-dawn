@@ -409,14 +409,6 @@ class CoordinationAgent(BaseAgent):
             Result from remote agent
         """
         try:
-            # Parse target
-            # TODO: Refactor p2p_node.call_agent to accept parsed node_id and agent_id
-            # if ":" in target:
-            #     node_id, agent_id = target.split(":", 1)
-            # else:
-            #     node_id = self.p2p_node.node_id
-            #     agent_id = target
-            
             # Call agent via P2P node
             response = await self.p2p_node.call_agent(
                 target=target,

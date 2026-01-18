@@ -80,6 +80,8 @@ class TestSystemComponents:
         """Test peer registry integration"""
         identity = NodeIdentity()
         node = P2PNode(identity, enable_encryption=False)
+        node.peer_registry.persist = False
+        node.peer_registry.clear()
         
         # Add peer to registry
         peer = Peer(node_id="peer1", address="ws://peer1:8000")
