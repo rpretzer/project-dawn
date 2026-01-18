@@ -18,9 +18,11 @@ class TestSandbox:
         available = manager.is_available()
         assert isinstance(available, bool)
 
-    @mock.patch('docker.from_env')
+    @mock.patch('security.sandbox.docker.from_env' if DOCKER_AVAILABLE else 'unittest.mock.MagicMock')
     def test_execute_python_mock(self, mock_docker):
         """Test python execution with mocked Docker"""
+        if not DOCKER_AVAILABLE:
+            pytest.skip("Docker library not available for mock test")
         # Setup mock
         mock_client = mock.MagicMock()
         mock_docker.return_value = mock_client
