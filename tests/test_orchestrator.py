@@ -3,7 +3,8 @@ import asyncio
 import time
 import os
 
-from orchestrator import Orchestrator
+from orchestrator import Orchestrator, MAX_TASK_ATTEMPTS
+from compute import generate_proof_of_logits, synthetic_logits_provider
 from crypto import NodeIdentity
 from crypto.signing import MessageSigner
 
@@ -483,3 +484,243 @@ def test_task_attempts_failure_persisted(tmp_path):
 
     attempts = json.loads((data_dir / "mesh" / "task_attempts.json").read_text(encoding="utf-8"))
     assert attempts["task-2"] == 1
+
+
+# ---------------------------------------------------------------------------
+# End-to-end pipeline tests
+# ---------------------------------------------------------------------------
+
+
+def test_run_once_writes_signed_result_to_outbox(tmp_path):
+    """
+    Full pipeline: a work unit in the inbox is picked up by run_once(),
+    proofs are generated with the synthetic provider, signatures are valid,
+    and the result is persisted atomically to the outbox.
+    """
+    orchestrator = _make_orchestrator(tmp_path)
+    work_unit = {
+        "taskId": "task-e2e",
+        "inputBlob": {
+            "inputTokens": [10, 20, 30],
+            "outputTokens": [40, 50, 60, 70],
+            "seed": 99,
+        },
+    }
+    (orchestrator.inbox_dir / "task-e2e.json").write_text(
+        json.dumps(work_unit), encoding="utf-8"
+    )
+
+    result_path = asyncio.run(orchestrator.run_once())
+
+    assert result_path is not None, "run_once should return the outbox path"
+    assert result_path.exists(), "outbox file must exist"
+
+    payload = json.loads(result_path.read_text(encoding="utf-8"))
+    assert payload["taskId"] == "task-e2e"
+    assert payload["peerId"] == orchestrator.peer_id
+
+    proofs = payload["proofOfLogits"]
+    assert proofs, "proofs must be non-empty"
+    # Verify every proof is signed with this node's key
+    assert orchestrator.validate_local_proof(proofs) is True
+
+
+def test_run_once_requester_reputation_updated(tmp_path):
+    """
+    When a work unit includes a requesterPeerId, that peer's reputation is
+    updated after processing.
+    """
+    orchestrator = _make_orchestrator(tmp_path)
+    work_unit = {
+        "taskId": "task-rep",
+        "requesterPeerId": "requester-1",
+        "inputBlob": {
+            "inputTokens": [1, 2],
+            "outputTokens": [3, 4],
+            "seed": 0,
+        },
+    }
+    (orchestrator.inbox_dir / "task-rep.json").write_text(
+        json.dumps(work_unit), encoding="utf-8"
+    )
+
+    asyncio.run(orchestrator.run_once())
+
+    record = orchestrator.reputation.get_peer("requester-1")
+    assert record is not None, "reputation record should be created for requester"
+
+
+def test_run_once_max_attempts_blocks_execution(tmp_path):
+    """
+    A task that has already reached MAX_TASK_ATTEMPTS must not be processed again.
+    """
+    orchestrator = _make_orchestrator(tmp_path)
+    task_id = "task-maxed"
+    work_unit = {
+        "taskId": task_id,
+        "inputBlob": {"inputTokens": [1], "outputTokens": [2], "seed": 0},
+    }
+    (orchestrator.inbox_dir / f"{task_id}.json").write_text(
+        json.dumps(work_unit), encoding="utf-8"
+    )
+
+    # Pre-load the attempt counter to the maximum
+    orchestrator._task_attempts[task_id] = MAX_TASK_ATTEMPTS
+    orchestrator._save_task_attempts()
+
+    result = asyncio.run(orchestrator.run_once())
+
+    assert result is None, "run_once must return None when max attempts exceeded"
+    # Outbox should be empty — the task was not computed
+    assert not list(orchestrator.outbox_dir.glob("*.json"))
+
+
+def test_three_peer_consensus_pipeline(tmp_path):
+    """
+    Full 3-peer consensus pipeline using synthetic_logits_provider:
+
+    - Peers A and B compute with the same seed (same logit hashes → agreement).
+    - Peer C computes with a different seed (different logit hashes → minority).
+    - process_peer_results() must produce an accepted receipt naming A and B as winners.
+    - Peer C's reputation must be penalised; A and B's must improve.
+    """
+    orchestrator = _make_orchestrator(tmp_path)
+    task_id = "task-3peer"
+
+    input_tokens = [1, 2, 3]
+    output_tokens = [4, 5, 6, 7, 8]
+
+    peers = [
+        ("peer-a", 42),   # same seed — will agree with peer-b
+        ("peer-b", 42),   # same seed — will agree with peer-a
+        ("peer-c", 99),   # different seed — minority
+    ]
+
+    for peer_name, seed in peers:
+        identity = NodeIdentity()
+        signer = MessageSigner(identity)
+        proofs = generate_proof_of_logits(
+            model=None,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            sample_rate=1.0,   # prove every token position
+            top_k=5,
+            seed=seed,
+            signer=signer,
+            logits_provider=synthetic_logits_provider(seed),
+        )
+        orchestrator.submit_peer_result(
+            task_id,
+            {
+                "peerId": peer_name,
+                "publicKey": identity.serialize_public_key().hex(),
+                "proofOfLogits": proofs,
+            },
+        )
+
+    receipts = orchestrator.process_peer_results()
+
+    assert receipts, "consensus receipt must be written"
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+
+    assert receipt["taskId"] == task_id
+    assert receipt["accepted"] is True
+    assert set(receipt["winners"]) == {"peer-a", "peer-b"}
+
+    # Winners should have improved reputation; loser should be penalised.
+    assert orchestrator.reputation.get_peer("peer-a").reputationScore > 0.1
+    assert orchestrator.reputation.get_peer("peer-b").reputationScore > 0.1
+    assert orchestrator.reputation.get_peer("peer-c").reputationScore <= 0.1
+
+
+def test_consensus_rejected_when_no_majority(tmp_path):
+    """
+    If all three peers produce different logit hashes, no pair agrees and
+    consensus must be rejected (no majority of 2).
+    """
+    orchestrator = _make_orchestrator(tmp_path)
+    task_id = "task-no-majority"
+
+    input_tokens = [1]
+    output_tokens = [2, 3]
+
+    # Use three unique seeds so every logit hash is different.
+    for i, seed in enumerate([1, 2, 3]):
+        identity = NodeIdentity()
+        signer = MessageSigner(identity)
+        proofs = generate_proof_of_logits(
+            model=None,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            sample_rate=1.0,
+            top_k=5,
+            seed=seed,
+            signer=signer,
+            logits_provider=synthetic_logits_provider(seed),
+        )
+        orchestrator.submit_peer_result(
+            task_id,
+            {
+                "peerId": f"peer-{i}",
+                "publicKey": identity.serialize_public_key().hex(),
+                "proofOfLogits": proofs,
+            },
+        )
+
+    receipts = orchestrator.process_peer_results()
+    assert receipts, "receipt must still be written even for rejected consensus"
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["accepted"] is False
+
+
+def test_write_json_atomic_is_crash_safe(tmp_path):
+    """
+    _write_json_atomic must produce a file at the target path with the expected
+    content.  The tmp file must not remain after a successful write.
+    """
+    target = tmp_path / "state.json"
+    payload = {"key": "value", "number": 42}
+    Orchestrator._write_json_atomic(target, payload)
+
+    assert target.exists()
+    assert not (tmp_path / "state.json.tmp").exists(), "tmp file must be cleaned up"
+
+    loaded = json.loads(target.read_text(encoding="utf-8"))
+    assert loaded == payload
+
+
+def test_consensus_receipt_written_atomically(tmp_path):
+    """
+    process_peer_results() must write the consensus receipt via _write_json_atomic
+    (no tmp file left behind).
+    """
+    orchestrator = _make_orchestrator(tmp_path)
+    task_id = "task-atomic-receipt"
+
+    for i, seed in enumerate([7, 7, 99]):
+        identity = NodeIdentity()
+        signer = MessageSigner(identity)
+        proofs = generate_proof_of_logits(
+            model=None,
+            input_tokens=[1],
+            output_tokens=[2, 3],
+            sample_rate=1.0,
+            top_k=5,
+            seed=seed,
+            signer=signer,
+            logits_provider=synthetic_logits_provider(seed),
+        )
+        orchestrator.submit_peer_result(
+            task_id,
+            {
+                "peerId": f"p{i}",
+                "publicKey": identity.serialize_public_key().hex(),
+                "proofOfLogits": proofs,
+            },
+        )
+
+    receipts = orchestrator.process_peer_results()
+    assert receipts
+
+    # No leftover tmp file
+    assert not list(orchestrator.consensus_dir.glob("*.tmp"))

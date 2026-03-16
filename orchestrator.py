@@ -213,9 +213,15 @@ class Orchestrator:
 
     @staticmethod
     def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+        """Write JSON atomically: open tmp → write → flush → fsync → rename."""
+        import os as _os
+        data = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
         tmp_path = path.with_suffix(".json.tmp")
-        tmp_path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(data)
+            handle.flush()
+            _os.fsync(handle.fileno())
+        _os.replace(tmp_path, path)
 
     def validate_local_proof(self, proofs: ProofList) -> bool:
         """
@@ -369,7 +375,7 @@ class Orchestrator:
                 "timestamp": time.time(),
             }
             receipt_path = self.consensus_dir / f"{path.stem}.json"
-            receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            self._write_json_atomic(receipt_path, receipt)
             processed.append(receipt_path)
             path.rename(path.with_suffix(".jsonl.processed"))
         return processed
