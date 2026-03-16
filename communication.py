@@ -27,9 +27,19 @@ class AgentManifest:
     logitFingerprint: str
     displayName: str
     createdAt: float
+    # Lineage fields — None/0 for genesis agents; set when spawned from a parent.
+    parentId: Optional[str] = None
+    generation: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "AgentManifest":
+        """Load a manifest tolerantly — unknown or missing fields are ignored."""
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        filtered = {k: v for k, v in payload.items() if k in known}
+        return cls(**filtered)
 
 
 @dataclass
@@ -68,7 +78,7 @@ class AgentGossip:
         if not self.manifest_path.exists():
             return None
         payload = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        return AgentManifest(**payload)
+        return AgentManifest.from_dict(payload)
 
     def save_manifest(self, manifest: AgentManifest) -> None:
         self._atomic_write_json(self.manifest_path, manifest.to_dict())

@@ -141,6 +141,28 @@ class Orchestrator:
             createdAt=time.time(),
         )
         self.gossip.save_manifest(manifest)
+        self._write_lineage(manifest)
+
+    def _write_lineage(self, manifest: AgentManifest) -> None:
+        """
+        Persist vault/lineage.json — the cryptographically traceable lineage record
+        for this agent.  Written once at genesis; extended when a child is spawned.
+        The file records the full chain: parentId, generation, and the logit
+        fingerprint distance between generations (heritable genetic material).
+        """
+        lineage_path = self.vault_dir / "lineage.json"
+        if lineage_path.exists():
+            return  # already written for this agent
+
+        record = {
+            "peerId": manifest.peerId,
+            "pgpFingerprint": manifest.pgpFingerprint,
+            "logitFingerprint": manifest.logitFingerprint,
+            "parentId": manifest.parentId,
+            "generation": manifest.generation,
+            "createdAt": manifest.createdAt,
+        }
+        self._write_json_atomic(lineage_path, record)
 
     def start_discovery(self) -> None:
         if not self.enable_mdns:
