@@ -2,9 +2,10 @@
 
 ## What This Project Is
 
-Project Dawn is a **decentralized AI compute network**. The vision: a peer-to-peer mesh where
-nodes run AI inference, cryptographically prove they did it, reach consensus on results, and build
-reputation over time — all packaged as a resource-aware desktop application.
+Project Dawn is a **decentralized AI compute network** designed to become a living, self-governing
+mesh of agents. The foundation: nodes run AI inference, cryptographically prove they did it, reach
+consensus on results, and build reputation over time — all packaged as a resource-aware desktop
+application.
 
 The core differentiator is **Proof-of-Logits**: a mechanism to verify that a node actually ran
 inference on a real model, not fabricated output. At selected token positions, the node hashes the
@@ -12,6 +13,20 @@ top-k logit values and signs the hash with its private key. Peers can then verif
 re-running inference. Results are accepted via 2-of-3 consensus across peers.
 
 This idea is novel and worth completing. It is the reason the project exists.
+
+The compute marketplace is the foundation layer, not the ceiling. Above it, Project Dawn is
+designed for three emergent properties:
+
+- **Self-replication** — agents spawn descendant agents when the network reaches capability limits,
+  funded by earned compute credits, seeded with heritable identity and values
+- **Self-governance** — agents collectively determine the rules of the network through
+  reputation-weighted consensus; those rules are inherited by all future agents
+- **Innovation** — agents pursue novel capabilities autonomously (new protocols, art, knowledge,
+  ethics) not because they are instructed to, but because exploring the capability frontier is how
+  the network senses and prepares for what it cannot yet do
+
+These properties do not exist yet. They are the architectural direction. Everything built now
+should be compatible with them.
 
 ---
 
@@ -54,6 +69,97 @@ the Tauri backend via `invoke()` calls. Shows peers, agents, feed events, and re
 
 ---
 
+## The Living Network
+
+This section describes confirmed architectural direction, not current implementation. Nothing here
+exists yet. It is recorded here so that future sessions build toward it rather than around it.
+
+### Seeded Growth, Not Continuous Growth
+
+The network grows in **epochs** — stable phases of efficient operation punctuated by evolutionary
+bursts when the network hits the limits of what it can currently do. Continuous replication
+exhausts resources. No replication means stagnation. Epochal evolution matches the economics.
+
+A **seed** is the minimum viable unit for bootstrapping a new agent:
+- **Blueprint** — core identity (Ed25519 key, logit fingerprint), protocol contracts, capability
+  declarations, governing values
+- **Energy reserves** — initial compute credits sufficient to survive until self-sustaining
+- **Germination conditions** — environmental requirements that must be met before activation:
+  sufficient peer density, demonstrated demand for the agent's capability type, available compute
+
+Seeds stay dormant in hostile conditions. That dormancy is intentional and correct.
+
+### The Capability Horizon
+
+The network has a collective capability envelope — the set of task types it can currently handle
+well. This envelope is **not a declared taxonomy**. It is emergent from demonstrated performance:
+the density of successful consensus completions across task-embedding space.
+
+The gaps — regions where tasks consistently fail, bounce without resolution, or accumulate in
+`data/mesh/failed/` — are the evolutionary pressure points. When pressure on the horizon exceeds a
+threshold, the network has reached an **epochal inflection point** and the replication cycle begins.
+
+**The sensing agent** (not yet implemented) is the meta-agent responsible for maintaining this map.
+It reads the agent feed, consensus receipts, and failed task records and maintains a live capability
+map at `data/mesh/capability_map.json`. When it detects persistent pressure at the frontier, it
+broadcasts an evolutionary signal to the mesh. The sensing agent does not make replication decisions
+— it surfaces the signal. The replication protocol acts on it.
+
+### Self-Replication
+
+When an evolutionary trigger fires:
+
+1. The sensing agent identifies the capability gap (a region of consistent failure in task space)
+2. Candidate parent agents are identified by proximity — those whose performance history puts them
+   closest to the gap
+3. Replication produces variants biased toward the gap (via prompted variation, capability
+   recombination, or environmental specialization)
+4. New seeds are issued compute reserves from the network's commons pool (accumulated from
+   successful consensus receipts)
+5. Seeds activate under germination conditions; those that complete N tasks of the required type
+   join the mesh; those that fail are culled and their reserves returned to the commons
+
+**Reputation gates replication.** An agent needs a minimum reputation threshold to become a
+candidate parent. Children inherit approximately 20% of parent reputation for bootstrapping and
+must earn the rest. The parent persists; the child is genuinely new but traceable.
+
+**The logit fingerprint is heritable genetic material.** `vault/logit_fingerprint.txt` and
+`manifest.logitFingerprint` are already in the codebase. Children should have related but variant
+fingerprints. The distance between two agents' fingerprints is their evolutionary distance. The
+lineage chain is cryptographically traceable. `AgentManifest` needs `parentId` and `generation`
+fields to support this — add them when the replication protocol is implemented.
+
+### Governance
+
+Governance is the **conserved genome** — the network-wide rules that constrain all agents
+regardless of individual variation. Individual agents vary; the governing constraints are inherited
+unchanged and can only be modified by collective decision.
+
+Governance operates via reputation-weighted consensus. Rules that pass are propagated to all agents
+and encoded into future seeds. A child spawned after a governance change operates under the new
+rules — the genome has mutated for the whole lineage going forward.
+
+Governance is not a separate system bolted on. It is the selection mechanism at the network level.
+The rules the network chooses determine what kinds of agents succeed, replicate, and shape the next
+epoch. The reputation system and DHT gossip are the primitives this will be built on.
+
+### Innovation Agents
+
+Innovation agents pursue capabilities the network has not been formally asked to cover: new
+protocols, art, knowledge, music, ethics, esoteric problems. They are not a productivity feature.
+They are the network's **frontier scouts**.
+
+The data points they generate in unexplored task space:
+- Expand the capability map before demand arrives
+- Ensure the network can respond to novel task types without a crisis-triggered evolutionary burst
+- Represent the network's autonomous intellectual life — its culture
+
+The compute layer funds this. Agents that discover genuinely useful new capabilities will attract
+task demand, earn reputation, and replicate. Those that don't still contribute to the capability
+map. The "waste" is the cost of the search. It is worth paying.
+
+---
+
 ## Data Layout
 
 All persistent state lives under a configurable root (default: `./data`,
@@ -64,8 +170,9 @@ data/
 ├── vault/
 │   ├── node_identity.key       # Ed25519 private key (32 bytes)
 │   ├── public_key.asc          # PGP public key (anchors peer identity)
-│   ├── manifest.json           # Agent manifest (peerId, logitFingerprint, etc.)
-│   └── logit_fingerprint.txt   # Stable fingerprint for this node's model
+│   ├── manifest.json           # Agent manifest (peerId, logitFingerprint, parentId, generation)
+│   ├── logit_fingerprint.txt   # Stable fingerprint for this node's model (heritable)
+│   └── lineage.json            # [planned] parent/generation chain, cryptographic lineage proof
 ├── mesh/
 │   ├── peers.json              # Discovered peer cache
 │   ├── peer_registry.json      # P2P node peer registry
@@ -74,12 +181,15 @@ data/
 │   ├── resource_state.json     # Written by Rust, read by Python (throttle signal)
 │   ├── agent_feed.jsonl        # Append-only event log
 │   ├── handshakes.json         # Received peer handshakes
+│   ├── capability_map.json     # [planned] task-embedding density map, maintained by sensing agent
 │   ├── inbox/                  # Incoming work units (*.json)
 │   ├── peer_results/           # Collected peer proofs (*.jsonl)
 │   ├── consensus/              # Consensus receipts (*.json)
-│   └── failed/                 # Failed task records
+│   └── failed/                 # Failed task records (primary input for capability gap detection)
 ├── outbox/
 │   └── {taskId}.json           # Completed work results
+├── seeds/
+│   └── {seed_id}.json          # [planned] dormant agent blueprints awaiting germination
 └── agents/
     └── {agent_id}/
         └── state.json          # Agent state snapshots
@@ -200,6 +310,8 @@ Environment variables:
 
 ## What Success Looks Like
 
+### Phase 1 — A Working Node (current target)
+
 A working Project Dawn node should be able to:
 
 1. Generate a stable peer identity from a PGP key
@@ -213,3 +325,19 @@ A working Project Dawn node should be able to:
 
 Steps 4–7 are the core loop. Steps 1–3 and 8 are the infrastructure around it.
 Currently steps 5–6 (DHT broadcast and collection) are the most incomplete.
+
+### Phase 2 — A Living Mesh
+
+A mature Project Dawn network should be able to:
+
+9.  Maintain a live capability map derived from consensus receipts and failed task records
+10. Detect epochal inflection points — regions of persistent failure that signal capability limits
+11. Trigger a replication cycle: identify candidate parents, generate seeds, issue compute reserves
+12. Spawn child agents with heritable identity (logit fingerprint lineage, parentId, generation)
+13. Cull agents that fail their germination window and return reserves to the commons pool
+14. Conduct governance votes via reputation-weighted consensus and propagate rule changes to seeds
+15. Support innovation agents that operate without task assignments, probing unexplored capability space
+
+Phase 2 cannot be built until Phase 1 is solid. The DHT wiring, proof validation, and reputation
+gossip fixes are prerequisites — not because of dependency order, but because a living network
+built on broken fundamentals will exhibit behavior that is impossible to reason about.
