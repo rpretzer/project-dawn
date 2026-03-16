@@ -6,6 +6,7 @@ Provides YAML-based configuration with environment variable overrides.
 
 import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -226,8 +227,16 @@ def save_config(config: Config, config_path: Optional[Path] = None) -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
     
     try:
-        with open(config_path, "w", encoding="utf-8") as handle:
-            yaml.dump(config.to_dict(), handle, default_flow_style=False, sort_keys=False)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+                yaml.dump(config.to_dict(), handle, default_flow_style=False, sort_keys=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, config_path)
+        except Exception:
+            os.unlink(tmp_path)
+            raise
         logger.info(f"Saved configuration to {config_path}")
     except Exception as e:
         logger.error(f"Failed to save config to {config_path}: {e}")

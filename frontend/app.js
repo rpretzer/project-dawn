@@ -414,7 +414,7 @@ class App {
         }
 
         container.innerHTML = items.map((item, i) => `
-            <div class="item-card" data-type="${type}" data-index="${i}" data-item='${JSON.stringify(item)}'>
+            <div class="item-card" data-type="${type}" data-index="${i}" data-item="${this.escapeHtml(JSON.stringify(item))}">
                 <div class="item-name">${this.escapeHtml(item.name || item.uri || 'Unnamed')}</div>
                 <div class="item-desc">${this.escapeHtml(item.description || '')}</div>
             </div>
@@ -576,7 +576,7 @@ class App {
             if (select) {
                 const models = result.models || [];
                 select.innerHTML = models.length
-                    ? models.map(m => `<option value="${m}">${m}</option>`).join('')
+                    ? models.map(m => `<option value="${this.escapeHtml(m)}">${this.escapeHtml(m)}</option>`).join('')
                     : '<option value="">No models found</option>';
             }
         } catch (e) {

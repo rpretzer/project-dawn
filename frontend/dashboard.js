@@ -11,6 +11,15 @@ export class Dashboard {
         this.topologyData = { nodes: [], edges: [] };
     }
 
+    escapeHtml(str) {
+        return String(str ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     mount(containerId) {
         this.container = document.getElementById(containerId);
         if (!this.container) return;
@@ -139,11 +148,11 @@ export class Dashboard {
 
         container.innerHTML = metrics.map(m => `
             <div class="metric-card">
-                <div class="metric-value" style="color: var(--${m.color})">${m.value}</div>
-                <div class="metric-label">${m.label}</div>
+                <div class="metric-value" style="color: var(--${m.color})">${this.escapeHtml(m.value)}</div>
+                <div class="metric-label">${this.escapeHtml(m.label)}</div>
             </div>
         `).join('');
-        
+
         // Also update alert list if there are unhealthy nodes
         if (stats.health.unhealthy_nodes > 0) {
             this.renderAlerts([{
@@ -170,8 +179,8 @@ export class Dashboard {
 
         container.innerHTML = metrics.map(m => `
             <div class="metric-card">
-                <div class="metric-value" style="color: var(--${m.color})">${m.value}</div>
-                <div class="metric-label">${m.label}</div>
+                <div class="metric-value" style="color: var(--${m.color})">${this.escapeHtml(m.value)}</div>
+                <div class="metric-label">${this.escapeHtml(m.label)}</div>
             </div>
         `).join('');
     }
@@ -218,11 +227,11 @@ export class Dashboard {
         }
 
         container.innerHTML = alerts.map(alert => `
-            <div class="alert-card ${alert.severity}">
-                <div class="alert-icon">⚠️</div>
+            <div class="alert-card ${this.escapeHtml(alert.severity)}">
+                <div class="alert-icon">&#x26A0;&#xFE0F;</div>
                 <div class="alert-content">
-                    <div class="alert-title">${alert.name}</div>
-                    <div class="alert-value">${alert.value}</div>
+                    <div class="alert-title">${this.escapeHtml(alert.name)}</div>
+                    <div class="alert-value">${this.escapeHtml(alert.value)}</div>
                 </div>
             </div>
         `).join('');
@@ -294,9 +303,9 @@ export class Dashboard {
                                 fill="${node.type === 'local' ? 'var(--accent)' : 'var(--bg-input)'}" 
                                 stroke="${node.type === 'local' ? 'none' : 'var(--border-focus)'}"
                                 stroke-width="2" />
-                        <text dy="${node.type === 'local' ? 35 : 30}" text-anchor="middle" 
+                        <text dy="${node.type === 'local' ? 35 : 30}" text-anchor="middle"
                               fill="var(--text-secondary)" font-size="10">
-                            ${node.label}
+                            ${this.escapeHtml(node.label)}
                         </text>
                     </g>
                 `).join('')}

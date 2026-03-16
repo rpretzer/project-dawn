@@ -152,8 +152,8 @@ class SandboxManager:
                 # Kill container if timed out
                 try:
                     container.kill()
-                except:
-                    pass
+                except Exception as kill_err:
+                    logger.debug(f"Failed to kill timed-out container: {kill_err}")
                 return {
                     "success": False,
                     "error": f"Execution timed out after {timeout}s",

@@ -6,9 +6,10 @@ Manages peer trust levels and whitelisting.
 
 import json
 import logging
+import time
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
 from data_paths import data_root
@@ -175,7 +176,6 @@ class TrustManager:
         Returns:
             Trust record
         """
-        import time
         record = TrustRecord(
             node_id=node_id,
             trust_level=trust_level,
@@ -197,7 +197,6 @@ class TrustManager:
             public_key: Ed25519 public key (hex)
             audit_logger: Optional audit logger for security events
         """
-        import time
         from .audit import AuditEventType
         
         record = self.trust_records.get(node_id)
