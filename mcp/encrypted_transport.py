@@ -17,6 +17,8 @@ from crypto import (
     perform_key_exchange,
 )
 
+logger = logging.getLogger(__name__)
+
 # Try to import websockets
 try:
     import websockets

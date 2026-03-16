@@ -218,7 +218,18 @@ class Orchestrator:
         tmp_path.replace(path)
 
     def validate_local_proof(self, proofs: ProofList) -> bool:
-        return bool(proofs)
+        """
+        Verify that locally generated proofs are correctly signed with this node's key.
+        Uses the same verification path as _verify_peer_result() for consistency.
+        """
+        if not proofs:
+            return False
+        public_key_bytes = self.identity.serialize_public_key()
+        for entry in proofs:
+            if not self._verify_proof_signature(entry, public_key_bytes):
+                logger.warning("Local proof failed signature verification at index %s", entry.get("index"))
+                return False
+        return True
 
     def validate_peer_result(self, peer_results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

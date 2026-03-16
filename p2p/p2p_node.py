@@ -12,6 +12,8 @@ import time
 from typing import Any, Dict, Optional, List, Callable
 from uuid import uuid4
 
+MAX_MESSAGE_BYTES = 1 * 1024 * 1024  # 1 MB — drop before parsing to prevent memory exhaustion
+
 from crypto import NodeIdentity
 from mcp.server import MCPServer
 from mcp.encrypted_transport import EncryptedWebSocketServer, EncryptedWebSocketTransport
@@ -366,8 +368,14 @@ class P2PNode:
     async def _handle_peer_message(self, sender_node_id: str, message: str) -> None:
         """Handle message from peer"""
         try:
-            # Apply privacy layer if enabled (decrypt onion, unpad)
+            # Reject oversized messages before any parsing to prevent memory exhaustion
             message_bytes = message.encode('utf-8')
+            if len(message_bytes) > MAX_MESSAGE_BYTES:
+                logger.warning(
+                    "Dropped oversized message from %s... (%d bytes)",
+                    sender_node_id[:16], len(message_bytes)
+                )
+                return
             
             if self.enable_privacy and self.privacy_layer:
                 processed_message = await self.privacy_layer.receive_private_message(

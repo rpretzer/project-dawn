@@ -18,6 +18,11 @@ logger = logging.getLogger(__name__)
 
 DECAY_WINDOW_SECONDS = 30 * 24 * 60 * 60
 
+# How much gossip moves a score. 0.3 means a single gossip event can shift a score
+# by at most 30% of the gap between the current value and the incoming value.
+# Scores can go up OR down via gossip, but change is bounded per sync cycle.
+GOSSIP_WEIGHT = 0.3
+
 
 @dataclass
 class PeerReputation:
@@ -155,6 +160,10 @@ class ReputationManager:
     def sync_reputation(self, peer_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Update local trust scores based on peer data from the mesh.
+
+        Uses a weighted blend (GOSSIP_WEIGHT) so gossip can move scores in either
+        direction but cannot cause large jumps in a single cycle. This prevents a
+        coordinated group of peers from inflating each other's scores via max() merging.
         """
         now = time.time()
         for node in peer_nodes:
@@ -162,9 +171,17 @@ class ReputationManager:
             if not peer_id:
                 continue
             record = self._records.get(peer_id) or PeerReputation(peerId=peer_id)
-            incoming_score = float(node.get("reputationScore", record.reputationScore))
-            record.reputationScore = max(record.reputationScore, incoming_score)
-            record.uptime = max(record.uptime, float(node.get("uptime", record.uptime)))
+
+            incoming_score = max(0.0, min(1.0, float(node.get("reputationScore", record.reputationScore))))
+            incoming_uptime = max(0.0, float(node.get("uptime", record.uptime)))
+
+            # Weighted blend: local observations dominate, gossip applies pressure in both directions
+            record.reputationScore = (
+                (1.0 - GOSSIP_WEIGHT) * record.reputationScore + GOSSIP_WEIGHT * incoming_score
+            )
+            record.uptime = (
+                (1.0 - GOSSIP_WEIGHT) * record.uptime + GOSSIP_WEIGHT * incoming_uptime
+            )
             record.lastVerified = max(record.lastVerified, float(node.get("lastVerified", record.lastVerified)))
             record.lastSeen = now
             record.lastDecay = record.lastDecay or record.lastVerified or now

@@ -20,6 +20,102 @@ def _signed_proof(identity, index, logit_hash, timestamp):
     }
 
 
+_PGP_KEY = "\n".join([
+    "-----BEGIN PGP PUBLIC KEY BLOCK-----",
+    "dGVzdC1rZXktYnl0ZXM=",
+    "=abcd",
+    "-----END PGP PUBLIC KEY BLOCK-----",
+])
+
+
+def _make_orchestrator(tmp_path):
+    """Create an Orchestrator with minimal required filesystem setup."""
+    data_dir = tmp_path / "data"
+    vault_dir = data_dir / "vault"
+    vault_dir.mkdir(parents=True, exist_ok=True)
+    (vault_dir / "public_key.asc").write_text(_PGP_KEY, encoding="utf-8")
+    return Orchestrator(data_dir=data_dir)
+
+
+# --- validate_local_proof tests ---
+
+def test_validate_local_proof_passes_with_correct_signature(tmp_path):
+    orchestrator = _make_orchestrator(tmp_path)
+    signer = MessageSigner(orchestrator.identity)
+    proof = {
+        "index": 1,
+        "logitHash": "deadbeef",
+        "timestamp": 12345,
+        "nodeSignature": signer.sign(b"1:deadbeef:12345").hex(),
+    }
+    assert orchestrator.validate_local_proof([proof]) is True
+
+
+def test_validate_local_proof_fails_with_tampered_signature(tmp_path):
+    orchestrator = _make_orchestrator(tmp_path)
+    signer = MessageSigner(orchestrator.identity)
+    proof = {
+        "index": 1,
+        "logitHash": "deadbeef",
+        "timestamp": 12345,
+        "nodeSignature": signer.sign(b"1:deadbeef:12345").hex(),
+    }
+    # Tamper: overwrite signature with zeroes
+    proof["nodeSignature"] = "00" * 64
+    assert orchestrator.validate_local_proof([proof]) is False
+
+
+def test_validate_local_proof_fails_with_wrong_key(tmp_path):
+    orchestrator = _make_orchestrator(tmp_path)
+    foreign_identity = NodeIdentity()
+    proof = _signed_proof(foreign_identity, 1, "deadbeef", 12345)
+    assert orchestrator.validate_local_proof([proof]) is False
+
+
+def test_validate_local_proof_fails_empty(tmp_path):
+    orchestrator = _make_orchestrator(tmp_path)
+    assert orchestrator.validate_local_proof([]) is False
+
+
+def test_validate_local_proof_fails_missing_signature_field(tmp_path):
+    orchestrator = _make_orchestrator(tmp_path)
+    proof = {"index": 1, "logitHash": "deadbeef", "timestamp": 12345}  # no nodeSignature
+    assert orchestrator.validate_local_proof([proof]) is False
+
+
+def test_validate_local_proof_rejects_if_any_entry_invalid(tmp_path):
+    orchestrator = _make_orchestrator(tmp_path)
+    signer = MessageSigner(orchestrator.identity)
+    good = {
+        "index": 0,
+        "logitHash": "aabb",
+        "timestamp": 1,
+        "nodeSignature": signer.sign(b"0:aabb:1").hex(),
+    }
+    bad = {
+        "index": 1,
+        "logitHash": "ccdd",
+        "timestamp": 2,
+        "nodeSignature": "00" * 64,
+    }
+    assert orchestrator.validate_local_proof([good, bad]) is False
+
+
+def test_default_compute_handler_produces_valid_local_proofs(tmp_path):
+    """Proofs from the default (synthetic) handler must pass validate_local_proof."""
+    orchestrator = _make_orchestrator(tmp_path)
+    work_unit = {
+        "taskId": "task-syn",
+        "inputBlob": {
+            "inputTokens": [1, 2, 3],
+            "outputTokens": [4, 5, 6, 7],
+            "seed": 42,
+        },
+    }
+    proofs = orchestrator.default_compute_handler(work_unit)
+    assert orchestrator.validate_local_proof(proofs) is True
+
+
 def test_orchestrator_processes_inbox(tmp_path):
     data_dir = tmp_path / "data"
     vault_dir = data_dir / "vault"
