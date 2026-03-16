@@ -130,14 +130,27 @@ async def main():
     data_dir = data_root()
     identity = _load_persistent_identity(data_dir)
     logger.info(f"Node ID: {identity.get_node_id()[:16]}...")
-    
+
+    # Bootstrap nodes: comma-separated ws://host:port list via env var.
+    _bootstrap_env = os.getenv("PROJECT_DAWN_BOOTSTRAP_NODES", "").strip()
+    bootstrap_nodes = [n.strip() for n in _bootstrap_env.split(",") if n.strip()] or None
+
+    # DHT: opt-in via env var (recommended once the network has multiple nodes).
+    enable_dht = os.getenv("PROJECT_DAWN_ENABLE_DHT", "false").lower() == "true"
+
+    if bootstrap_nodes:
+        logger.info(f"Bootstrap nodes: {bootstrap_nodes}")
+    if enable_dht:
+        logger.info("Kademlia DHT enabled")
+
     # Create P2P node
     node = P2PNode(
         identity=identity,
         address=f"ws://{host}:{ws_port}",
-        bootstrap_nodes=None,  # No bootstrap nodes for single-node setup
+        bootstrap_nodes=bootstrap_nodes,
         enable_encryption=True,
         enable_privacy=True,
+        enable_dht=enable_dht,
     )
     
     # Create and register first agent

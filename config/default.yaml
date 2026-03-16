@@ -5,6 +5,13 @@ node:
   address: ws://0.0.0.0:8000
   data_root: ~/.project-dawn
 
+network:
+  # Comma-separated or list of ws://host:port addresses for initial DHT seeding.
+  # Leave empty for single-node / local-only setups.
+  bootstrap_nodes: []
+  # Enable Kademlia DHT peer discovery (recommended for networks with > ~10 nodes).
+  enable_dht: false
+
 security:
   trust_level_default: UNKNOWN  # UNKNOWN, VERIFIED, TRUSTED, BOOTSTRAP
   reject_unknown: false

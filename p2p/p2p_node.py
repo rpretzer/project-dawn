@@ -50,6 +50,7 @@ class P2PNode:
         enable_encryption: bool = True,
         enable_privacy: bool = False,
         privacy_config: Optional[Dict[str, Any]] = None,
+        enable_dht: bool = False,
     ):
         """
         Initialize P2P node
@@ -106,7 +107,7 @@ class P2PNode:
             bootstrap_nodes=bootstrap_nodes,
             enable_mdns=True,
             enable_gossip=True,
-            enable_dht=False,  # DHT disabled by default (enable for large networks)
+            enable_dht=enable_dht,
             identity=identity,
         )
         
@@ -156,20 +157,27 @@ class P2PNode:
         self.server.trust_manager = self.trust_manager
         self.server.peer_validator = self.peer_validator
         
-        # Start discovery
-        await self.discovery.discover_bootstrap()
+        # Start discovery — capture bootstrap peers so we can seed the DHT routing table.
+        bootstrap_peers = await self.discovery.discover_bootstrap()
         self.discovery.start_mdns()
-        
+
         # Register with mDNS (avoid blocking the event loop)
         await asyncio.to_thread(self.discovery.register_mdns_service, self.node_id, self.address, port)
-        
+
         # Start gossip discovery
         self.discovery.start_gossip(self._broadcast_gossip_announcement)
-        
+
         # Start DHT discovery if enabled
         dht = self.discovery.get_dht()
         if dht:
+            # Seed routing table from bootstrap peers before starting active discovery.
+            for peer in bootstrap_peers:
+                dht.add_node(peer.node_id, peer.address)
+
             self.discovery.start_dht(self._handle_dht_rpc)
+
+            # Kick off an initial lookup for our own node ID to populate k-buckets.
+            asyncio.create_task(self.discovery.discover_peers_dht(self.node_id))
         
         # Record start time for uptime calculation
         self.start_time = time.time()
@@ -1089,33 +1097,82 @@ class P2PNode:
     
     async def _handle_dht_rpc(self, node_id: str, request: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Handle DHT RPC request from another node
-        
+        Outbound DHT RPC: send a DHT request to a remote peer and return their response.
+
+        This is the bridge between the Kademlia routing algorithm and the encrypted
+        WebSocket transport layer.  Called by the DHT when it needs to query a specific
+        remote node (e.g. for find_node or store operations).
+
+        The *inbound* side (handling DHT queries that arrive from peers) is handled by
+        _handle_node_method(), which already processes dht_find_node / dht_find_value /
+        dht_store messages that come in via _handle_peer_message().
+
         Args:
-            node_id: Node ID of requester
-            request: RPC request
-            
+            node_id: Target peer's node ID
+            request:  DHT request dict, e.g.
+                        {"method": "dht_find_node", "params": {"target_id": "..."}}
+
         Returns:
-            RPC response
+            JSON-RPC response dict from the remote peer, or an error dict.
         """
-        method = request.get("method", "")
-        params = request.get("params", {})
-        
-        # Route to appropriate handler
-        if method == "dht_find_node":
-            return await self._handle_node_method(method, params)
-        elif method == "dht_find_value":
-            return await self._handle_node_method(method, params)
-        elif method == "dht_store":
-            return await self._handle_node_method(method, params)
-        else:
+        # Ensure we have a live connection to the target node.
+        if node_id not in self.peer_connections:
+            peer = self.peer_registry.get_peer(node_id)
+
+            # Not in peer registry — look up the address in the DHT routing table.
+            if not peer:
+                dht = self.discovery.get_dht()
+                if dht:
+                    from .peer import Peer as _Peer
+                    for candidate in dht.get_closest_nodes(node_id, 1):
+                        if candidate.node_id == node_id:
+                            peer = _Peer(node_id=node_id, address=candidate.address)
+                            break
+
+            if not peer:
+                logger.warning("DHT RPC: no known address for %s...", node_id[:16])
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32601, "message": f"Peer not found: {node_id[:16]}..."},
+                }
+
+            connected = await self.connect_to_peer(peer)
+            if not connected:
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": f"Failed to connect to {node_id[:16]}..."},
+                }
+
+        transport = self.peer_connections.get(node_id)
+        if not transport:
             return {
                 "jsonrpc": "2.0",
-                "error": {
-                    "code": -32601,
-                    "message": "Method not found",
-                }
+                "error": {"code": -32603, "message": f"Connection lost for {node_id[:16]}..."},
             }
+
+        # Wrap in JSON-RPC envelope and send, then await the response.
+        request_id = str(uuid4())
+        rpc_message = {
+            "jsonrpc": "2.0",
+            "method": request["method"],
+            "params": request.get("params", {}),
+            "id": request_id,
+        }
+
+        future: asyncio.Future = asyncio.Future()
+        self.pending_requests[request_id] = future
+
+        try:
+            await transport.send(json.dumps(rpc_message))
+            return await asyncio.wait_for(future, timeout=10.0)
+        except asyncio.TimeoutError:
+            self.pending_requests.pop(request_id, None)
+            logger.warning("DHT RPC timeout contacting %s...", node_id[:16])
+            return {"jsonrpc": "2.0", "error": {"code": -32603, "message": "DHT RPC timeout"}}
+        except Exception as e:
+            self.pending_requests.pop(request_id, None)
+            logger.error("DHT RPC error to %s...: %s", node_id[:16], e)
+            return {"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}}
     
     async def call_agent(
         self,
