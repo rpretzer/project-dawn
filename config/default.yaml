@@ -33,3 +33,17 @@ logging:
 observability:
   metrics_port: 9090
   enable_tracing: false
+
+compute:
+  # Logits provider to use for Proof-of-Logits generation.
+  # "synthetic" — deterministic fake logits; no GPU required (default for development).
+  # "torch"     — real model inference via PyTorch; requires model_path and a compatible GPU.
+  logits_provider: synthetic
+
+  # Path to a HuggingFace-compatible model directory (required when logits_provider = torch).
+  model_path: ""
+
+  # Proof-of-Logits sampling parameters.
+  seed: 0
+  sample_rate: 0.1
+  top_k: 5

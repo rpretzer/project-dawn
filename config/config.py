@@ -74,7 +74,15 @@ class Config:
             "metrics_port": int(os.getenv("PROJECT_DAWN_METRICS_PORT", "9090")),
             "enable_tracing": os.getenv("PROJECT_DAWN_ENABLE_TRACING", "false").lower() == "true",
         }
-        
+
+        self.compute = {
+            "logits_provider": os.getenv("PROJECT_DAWN_LOGITS_PROVIDER", "synthetic"),
+            "model_path": os.getenv("PROJECT_DAWN_MODEL_PATH", ""),
+            "seed": int(os.getenv("PROJECT_DAWN_COMPUTE_SEED", "0")),
+            "sample_rate": float(os.getenv("PROJECT_DAWN_SAMPLE_RATE", "0.1")),
+            "top_k": int(os.getenv("PROJECT_DAWN_TOP_K", "5")),
+        }
+
         # Override with provided config data
         if config_data:
             self._merge_config(config_data)
@@ -105,6 +113,8 @@ class Config:
             self.logging = merge_dict(self.logging, config_data["logging"])
         if "observability" in config_data:
             self.observability = merge_dict(self.observability, config_data["observability"])
+        if "compute" in config_data:
+            self.compute = merge_dict(self.compute, config_data["compute"])
     
     def _apply_env_overrides(self) -> None:
         """Apply environment variable overrides"""
@@ -138,6 +148,7 @@ class Config:
             "resilience": self.resilience,
             "logging": self.logging,
             "observability": self.observability,
+            "compute": self.compute,
         }
     
     def validate(self) -> bool:
@@ -168,7 +179,32 @@ class Config:
         if not (1 <= self.observability["metrics_port"] <= 65535):
             logger.warning(f"Invalid metrics port: {self.observability['metrics_port']}, using 9090")
             self.observability["metrics_port"] = 9090
-        
+
+        # Validate compute
+        valid_providers = ["synthetic", "torch"]
+        provider = str(self.compute.get("logits_provider", "synthetic")).lower()
+        if provider not in valid_providers:
+            logger.warning(
+                "Invalid logits_provider '%s', falling back to 'synthetic'", provider
+            )
+            provider = "synthetic"
+        self.compute["logits_provider"] = provider
+
+        if provider == "torch" and not self.compute.get("model_path"):
+            logger.warning("logits_provider=torch but model_path is empty; will fail at runtime")
+
+        sample_rate = float(self.compute.get("sample_rate", 0.1))
+        if not (0 < sample_rate <= 1.0):
+            logger.warning("Invalid sample_rate %s, using 0.1", sample_rate)
+            sample_rate = 0.1
+        self.compute["sample_rate"] = sample_rate
+
+        top_k = int(self.compute.get("top_k", 5))
+        if top_k < 1:
+            logger.warning("Invalid top_k %s, using 5", top_k)
+            top_k = 5
+        self.compute["top_k"] = top_k
+
         return True
 
 

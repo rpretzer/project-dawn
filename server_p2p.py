@@ -28,6 +28,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Import P2P components
+from compute import build_compute_handler
+from config.config import get_config
 from crypto import NodeIdentity
 from data_paths import data_root
 from orchestrator import Orchestrator
@@ -216,11 +218,31 @@ async def main():
 
     pgp_key_path = data_dir / "vault" / "public_key.asc"
     if pgp_key_path.exists():
+        cfg = get_config()
+        try:
+            compute_handler = build_compute_handler(
+                logits_provider_name=cfg.compute["logits_provider"],
+                model_path=cfg.compute["model_path"],
+                seed=cfg.compute["seed"],
+                sample_rate=cfg.compute["sample_rate"],
+                top_k=cfg.compute["top_k"],
+            )
+            logger.info(
+                "Compute handler: provider=%s sample_rate=%s top_k=%s",
+                cfg.compute["logits_provider"],
+                cfg.compute["sample_rate"],
+                cfg.compute["top_k"],
+            )
+        except Exception as exc:
+            logger.warning("Failed to build configured compute handler (%s); falling back to synthetic", exc)
+            compute_handler = None  # Orchestrator will use its own default
+
         orchestrator = Orchestrator(
             data_dir=data_dir,
             pgp_public_key_path=pgp_key_path,
             mdns_port=ws_port,
             mdns_service_name="project-dawn-orchestrator",
+            compute_handler=compute_handler,
         )
         orchestrator_task = asyncio.create_task(orchestrator.run())
         logger.info("Orchestrator loop started")

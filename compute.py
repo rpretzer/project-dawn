@@ -146,6 +146,109 @@ def generate_proof_of_logits(
     return [entry.to_dict() for entry in proofs]
 
 
+def build_compute_handler(
+    logits_provider_name: str = "synthetic",
+    model_path: str = "",
+    seed: int = 0,
+    sample_rate: float = 0.1,
+    top_k: int = 5,
+) -> "Callable[[Dict[str, Any]], List[Dict[str, Any]]]":
+    """
+    Return a compute handler function suitable for Orchestrator(compute_handler=…).
+
+    Args:
+        logits_provider_name: ``"synthetic"`` or ``"torch"``.
+        model_path: Path to a HuggingFace-compatible model directory.
+                    Required (and used) only when *logits_provider_name* is ``"torch"``.
+        seed:        RNG seed for challenge-index selection (and synthetic logits).
+        sample_rate: Fraction of output tokens to sample for proof (0 < x ≤ 1).
+        top_k:       Number of top logit values to hash per sampled position.
+
+    Returns:
+        A callable ``(work_unit) -> proofs`` that the Orchestrator can use directly.
+
+    Raises:
+        ValueError: if *logits_provider_name* is not a recognised provider.
+        ImportError: if ``"torch"`` is requested but PyTorch is not installed.
+        FileNotFoundError: if ``"torch"`` is requested and *model_path* is missing or empty.
+    """
+    provider_name = logits_provider_name.lower()
+
+    if provider_name == "synthetic":
+        _logits_provider: Optional[LogitsProvider] = None  # resolved per work-unit below
+        _model: Any = None
+
+        def _synthetic_handler(work_unit: Dict[str, Any]) -> List[Dict[str, Any]]:
+            input_blob = work_unit.get("inputBlob", {})
+            input_tokens = input_blob.get("inputTokens")
+            output_tokens = input_blob.get("outputTokens")
+            if not isinstance(input_tokens, list) or not isinstance(output_tokens, list):
+                raise ValueError("inputBlob.inputTokens and inputBlob.outputTokens are required")
+            unit_seed = int(input_blob.get("seed", seed))
+            unit_rate = float(input_blob.get("sampleRate", sample_rate))
+            unit_top_k = int(input_blob.get("topK", top_k))
+            return generate_proof_of_logits(
+                model=None,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                sample_rate=unit_rate,
+                top_k=unit_top_k,
+                seed=unit_seed,
+                logits_provider=synthetic_logits_provider(unit_seed),
+            )
+
+        return _synthetic_handler  # type: ignore[return-value]
+
+    if provider_name == "torch":
+        if not model_path:
+            raise FileNotFoundError(
+                "logits_provider=torch requires a non-empty model_path"
+            )
+        model_dir = Path(model_path)
+        if not model_dir.exists():
+            raise FileNotFoundError(f"model_path does not exist: {model_path}")
+
+        try:
+            import importlib as _importlib
+            _torch = _importlib.import_module("torch")
+            _transformers = _importlib.import_module("transformers")
+        except ImportError as exc:
+            raise ImportError(
+                "logits_provider=torch requires PyTorch and transformers to be installed"
+            ) from exc
+
+        _model = _transformers.AutoModelForCausalLM.from_pretrained(
+            str(model_dir), torch_dtype=_torch.float32
+        )
+        _model.eval()
+        _torch_logits_provider = _default_logits_provider(_model)
+
+        def _torch_handler(work_unit: Dict[str, Any]) -> List[Dict[str, Any]]:
+            input_blob = work_unit.get("inputBlob", {})
+            input_tokens = input_blob.get("inputTokens")
+            output_tokens = input_blob.get("outputTokens")
+            if not isinstance(input_tokens, list) or not isinstance(output_tokens, list):
+                raise ValueError("inputBlob.inputTokens and inputBlob.outputTokens are required")
+            unit_seed = int(input_blob.get("seed", seed))
+            unit_rate = float(input_blob.get("sampleRate", sample_rate))
+            unit_top_k = int(input_blob.get("topK", top_k))
+            return generate_proof_of_logits(
+                model=_model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                sample_rate=unit_rate,
+                top_k=unit_top_k,
+                seed=unit_seed,
+                logits_provider=_torch_logits_provider,
+            )
+
+        return _torch_handler  # type: ignore[return-value]
+
+    raise ValueError(
+        f"Unknown logits_provider '{logits_provider_name}'. Choose 'synthetic' or 'torch'."
+    )
+
+
 def wrap_work_result(
     task_id: str,
     peer_id: str,
