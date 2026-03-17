@@ -40,7 +40,6 @@ def build_with_pyinstaller():
         "--add-data", f"{script_dir / 'llm'}:llm",
         "--hidden-import", "asyncio",
         "--hidden-import", "websockets",
-        "--hidden-import", "aiohttp",
         str(server_script),
     ]
     

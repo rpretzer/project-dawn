@@ -49,6 +49,7 @@ package-lock.json
 build/
 dist/
 *.spec
+src-tauri/sidecar/
 
 # Test coverage
 .coverage
