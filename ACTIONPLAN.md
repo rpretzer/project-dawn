@@ -1,7 +1,7 @@
 # ACTIONPLAN.md — Project Dawn
 
-_Concrete next steps, ordered by priority. Updated after completing Phase 2 (Governance Protocol)._
-_For strategic context see PLAN.md. For milestone definitions see ROADMAP.md._
+_Updated after full autonomy gap assessment. Previous phases complete._
+_Strategic context: CLAUDE.md. Milestone definitions: ROADMAP.md._
 
 ---
 
@@ -9,97 +9,238 @@ _For strategic context see PLAN.md. For milestone definitions see ROADMAP.md._
 
 | Area | Status | Evidence |
 |---|---|---|
-| Proof validation | ✅ Done | `orchestrator.py:validate_local_proof()` uses real Ed25519 verification |
-| Reputation gossip | ✅ Done | `reputation.py:sync_reputation()` uses weighted-average merge |
-| Atomic writes | ✅ Done | fsync + rename in orchestrator, SensingAgent, SeedManager, all persistence paths |
-| Compute config | ✅ Done | `build_compute_handler()` factory; `synthetic`/`torch`; config-driven |
-| DHT in-process | ✅ Done | `p2p/dht.py` tested with full Kademlia routing |
-| DHT real-socket wiring | ✅ Done | `P2PNode._handle_dht_rpc()` routes outbound over WebSocket; inbound in `_handle_node_method` |
-| DHT bridge (orchestrator) | ✅ Done | `server_p2p.py` replaces orchestrator DHT with P2PNode DHT when `enable_dht=True` |
-| Discovery routing-table seeding | ✅ Done | `SovereignDiscovery.record_peer()` calls `dht.add_node()`; `set_dht()` seeds from known peers |
-| Bootstrap discovery | ✅ Done | Real `node/get_info` WebSocket handshake; placeholder fallback for unreachable nodes |
-| Bootstrap CLI | ✅ Done | `./dawn peers --add ws://host:port` |
-| AgentManifest lineage | ✅ Done | `parentId`, `generation`, `from_dict()`; `vault/lineage.json` on genesis |
-| SensingAgent | ✅ Done | Scans consensus + failed → `capability_map.json`; wired into orchestrator loop |
-| Seed protocol | ✅ Done | `agents/seed_manager.py`: `SeedManager`, `CommonsPool`, full lifecycle + tests |
-| DoS hardening | ✅ Done | 1 MB message limit; trust-first; rate limiter wired to WebSocket |
-| Socket tests | ✅ Done | `test_transport.py` (3 tests), `test_discovery_dht_wiring.py` (7 tests) pass |
-| Replication agent | ✅ Done | `agents/replication_agent.py`: selects parents, derives blueprints, issues seeds; wired into orchestrator |
-| Governance protocol | ✅ Done | `agents/governance.py`: reputation-weighted proposal/vote/tally; accepted rules persisted + inherited |
-| Packaging (Tauri) | ✅ Done | Sidecar builds (PyInstaller → 12MB ELF); starts cleanly; `beforeBuildCommand` wired |
-| Real inference (torch) | ❌ Pending | Config path exists; requires GPU hardware to test |
+| Proof signing & validation | ✅ Done | `orchestrator.py:260-272`, `552-564` — real Ed25519 |
+| Reputation gossip | ✅ Done | `reputation.py:sync_reputation()` — weighted-average merge |
+| 2-of-3 consensus | ✅ Done | `orchestrator.py:274-333` |
+| DHT (in-process) | ✅ Done | `p2p/dht.py` — full Kademlia |
+| DHT (transport wiring) | ✅ Done | `p2p/p2p_node.py:1098-1171` + `server_p2p.py:264-268` |
+| SensingAgent loop | ✅ Done | `orchestrator.py:459-490` — runs every 60s |
+| ReplicationAgent loop | ✅ Done | `orchestrator.py:472-488` — fires on pressure |
+| Seed protocol | ✅ Done | `agents/seed_manager.py` — full lifecycle |
+| Governance protocol | ✅ Done | `agents/governance.py` — reputation-weighted vote |
+| Packaging (Tauri) | ✅ Done | Sidecar builds; `beforeBuildCommand` wired |
+| **Permission system** | ❌ Broken | `auth.py:185` returns False for everyone including local node |
+| **Work unit ingestion** | ❌ Missing | No HTTP endpoint; inbox written only by tests |
+| **Inference → action bridge** | ❌ Missing | Model output never drives tool calls |
+| **Ollama / real inference** | ❌ Not wired | Path exists in `compute.py`; not default; not available here |
 
-**Test suite:** 435 pass, 5 skipped (4 libp2p feature-gated, 1 sandbox mock).
+**Test suite:** 435 pass, 5 skipped.
 
 ---
 
-## Priority 1 — Packaging (Public Beta gate)
+## Priority 1 — Permissions: Unlock Agent-to-Agent Communication
 
-### How the sidecar mechanism works
+### What's broken
 
-`main.rs` uses manual path resolution (not Tauri's `new_sidecar()`):
-1. Looks for the executable at `{resource_dir}/sidecar/project-dawn-server[.exe]`
-2. Reads `{resource_dir}/sidecar/project-dawn-server[.exe].sha256`
-3. Verifies SHA-256 before launching
+`security/auth.py:has_permission()` returns `False` unconditionally for every caller,
+including the local node. `grant_permission()` is defined but never called in
+production. Result: CodeAgent, CoordinationAgent, and all tool dispatch are silently
+blocked for every inbound request.
 
-`tauri.conf.json` bundles the sidecar via `resources` (not `externalBin`, which was
-removed — it was declared but never used). `beforeBuildCommand` now runs the
-PyInstaller step automatically when `cargo tauri build` is invoked.
+### Changes
 
-### 1.1 Run the sidecar build and verify output
+**`security/auth.py`**
+- `has_permission(node_id, permission)`: treat `node_id is None` as a local call —
+  return `True`. Local process calls need no permission check.
+
+**`p2p/p2p_node.py`**
+- `_route_message`: if `sender_node_id is None` or `sender_node_id == self.node_id`,
+  skip the AGENT_EXECUTE check entirely — local routing is always allowed.
+- `_on_client_connect`: after key exchange, call
+  `auth_manager.grant_permission(peer_id, Permission.AGENT_EXECUTE)` for peers whose
+  trust level is MEDIUM or higher. Peers start at UNTRUSTED until the handshake
+  completes and TrustManager elevates them.
+
+### Acceptance
+
+- A local `tools/call` request reaches CodeAgent without rejection.
+- A remote peer with MEDIUM trust can call `tools/list` on a remote agent.
+- An UNTRUSTED peer is still rejected.
+
+---
+
+## Priority 2 — Task Ingestion: External Work Entry Point
+
+### What's missing
+
+`orchestrator.py:fetch_work_unit()` polls `data/mesh/inbox/*.json`. Nothing writes
+there in production. The node has no way to receive real work.
+
+### Changes
+
+**`server_api.py`** — add `do_POST` handler:
+
+```
+POST /api/tasks
+Body: {
+  "description": "...",        # human/machine task description
+  "taskType": "agentic",       # or "logit_proof" for raw token inference
+  "requesterPeerId": "...",    # optional; defaults to local node
+  "ttl": 300                   # seconds until expiry; default 300
+}
+Response: {"taskId": "...", "accepted": true}
+```
+
+- Validates schema (description required; taskType must be known).
+- Generates `taskId = sha256(description + timestamp)[:16]`.
+- Atomic write (`tmp → fsync → rename`) to `data/mesh/inbox/{taskId}.json`.
+- Broadcasts task ID to DHT so peers know work is available:
+  `dht.store("task:{taskId}", {taskId, requesterPeerId, taskType}, ttl=ttl)`.
+
+**`orchestrator.py`**
+- Extend `WorkUnit` TypedDict: add `taskType: str` (default `"logit_proof"`) and
+  `description: Optional[str]`.
+
+### Acceptance
 
 ```bash
-cd /path/to/project-dawn
-python scripts/build_python_sidecar.py
-# Expect: src-tauri/sidecar/project-dawn-server (binary)
-#         src-tauri/sidecar/project-dawn-server.sha256
-ls -lh src-tauri/sidecar/
+curl -X POST http://127.0.0.1:9090/api/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"description": "What is 2+2?", "taskType": "agentic"}'
+# → {"taskId": "a3f1...", "accepted": true}
+# → data/mesh/inbox/a3f1....json written
+# → orchestrator picks it up on next loop tick
 ```
 
-The build script writes the SHA-256 checksum automatically. Verify `main.rs`
-can find and verify it before proceeding to a full Tauri build.
+---
 
-Known PyInstaller pitfalls for this codebase:
-- `asyncio`, `websockets`, `zeroconf` all use dynamic imports — add `--hidden-import`
-  entries in `build_python_sidecar.py` if the built binary crashes on startup
-- `config/` and `data/` directories must either be bundled with `--add-data` or
-  resolved relative to the executable at runtime (not `__file__`)
-- Test the built binary standalone before wrapping it in Tauri:
-  ```bash
-  src-tauri/sidecar/project-dawn-server --help
-  ```
+## Priority 3 — Inference → Action Bridge
 
-### 1.2 Platform builds
+### What's missing
 
-PyInstaller produces platform-native binaries — **you cannot cross-compile**.
-Each platform requires its own CI runner.
+The compute loop calls `compute_handler(work_unit)` which generates logit hashes.
+The model's output — whether synthetic or real — never instructs the agent to *do*
+anything. The "proof" is cryptographic but the action is void.
 
-Recommended CI matrix (GitHub Actions):
+### Architecture
 
-```yaml
-strategy:
-  matrix:
-    include:
-      - os: ubuntu-22.04   → project-dawn-server (ELF), .deb / .AppImage
-      - os: macos-13       → project-dawn-server (Mach-O), .dmg
-      - os: windows-2022   → project-dawn-server.exe, .msi
+Introduce a second handler path gated by `work_unit["taskType"]`:
+
+```
+taskType == "logit_proof"   →  existing compute_handler (logit hash + sign)
+taskType == "agentic"       →  new agentic_handler (tool call + sign)
 ```
 
-For each platform, the full sequence is:
-1. `pip install -r requirements.txt pyinstaller`
-2. `python scripts/build_python_sidecar.py`
-3. `cargo tauri build`
-4. Smoke test: launch installer, start app, verify node identity is generated
+**`orchestrator.py:run_once()`** — routing decision:
 
-### 1.3 Audit and remove `src-tauri/bin/`
+```python
+task_type = work_unit.get("taskType", "logit_proof")
+if task_type == "agentic":
+    proofs = self._agentic_handler(work_unit)
+else:
+    proofs = self.compute_handler(work_unit)
+```
 
-`src-tauri/bin/project-dawn-server-x86_64-unknown-linux-gnu` is a stripped ELF
-with no documented provenance. It was likely placed there manually during early
-development. It is no longer referenced by `tauri.conf.json` (the `externalBin`
-entry has been removed).
+**`orchestrator.py:_agentic_handler(work_unit)`**:
 
-**Action:** Verify it is not needed, then delete it and remove the `bin/` directory.
-Do not commit binaries of unknown origin into the repository.
+1. Extract `description` from the work unit.
+2. Call `CoordinationAgent.handle_task(description)` — which routes to the
+   appropriate MCP tool (FirstAgent, CodeAgent, etc.) based on the task.
+3. Collect the tool result (JSON-serializable).
+4. Generate an **action proof**:
+   ```python
+   payload = f"{task_id}:{tool_name}:{json.dumps(result, sort_keys=True)}"
+   signature = identity.sign(payload.encode())
+   proof = {
+       "taskId": task_id,
+       "tool": tool_name,
+       "resultHash": sha256(payload).hexdigest(),
+       "nodeSignature": signature.hex(),
+       "timestamp": time.time(),
+   }
+   ```
+5. Return `[proof]` — same `ProofList` type, different shape.
+
+**`orchestrator.py:_verify_peer_result()`** — extend to handle both proof shapes:
+- If `proof` has `logitHash` → existing Ed25519 logit verification.
+- If `proof` has `resultHash` → verify signature over `taskId:tool:resultHash`.
+
+**Consensus for agentic tasks**: 2-of-3 peers must agree on the same `resultHash`.
+Ties (all different) → task marked failed, written to `data/mesh/failed/`.
+
+**`agents/coordination_agent.py`** — add `handle_task(description: str)` method:
+- Parses description to select tool (keyword routing for now; LLM routing later).
+- Dispatches to the registered tool.
+- Returns structured result.
+
+### Acceptance
+
+```bash
+# Submit an agentic task
+curl -X POST http://127.0.0.1:9090/api/tasks \
+  -d '{"description": "list current peers", "taskType": "agentic"}'
+
+# Orchestrator loop picks it up, CoordinationAgent calls list_peers tool,
+# result is signed and written to outbox, broadcast for consensus.
+cat data/outbox/<taskId>.json
+# → {taskId, proofs: [{tool, resultHash, nodeSignature, ...}]}
+```
+
+---
+
+## Priority 4 — Ollama: Real Inference Backend
+
+### Status
+
+Not available in current environment. Path exists (`compute.py:build_compute_handler`,
+`llm/ollama.py:chat_async`). This is hardware/deployment-gated.
+
+### When Ollama is available
+
+**`compute.py`** — add `ollama_logits_provider(model, host)`:
+1. Call `POST /api/generate` with `{"prompt": tokens, "logprobs": true}`.
+2. Ollama returns per-token `logprobs` (top-k log probabilities).
+3. Extract top-k at sampled positions → same output as `synthetic_logits_provider`.
+4. This makes Proof-of-Logits work with a real model, no GPU required (Ollama runs
+   on CPU with quantized models).
+
+**`compute.py:build_compute_handler()`** — add `"ollama"` case:
+```python
+elif logits_provider_name == "ollama":
+    provider = ollama_logits_provider(model_path, ollama_host)
+```
+
+**`config/config.yaml`** — add `compute.logits_provider: ollama` as the preferred
+default when `ollama` is detected at startup.
+
+**`server_p2p.py:main()`** — auto-detect Ollama at startup:
+```python
+if await ollama_is_available(config.ollama_host):
+    compute_config["logits_provider"] = "ollama"
+else:
+    logger.warning("Ollama not found; using synthetic logits (development mode)")
+```
+
+---
+
+## Priority 5 — CodeAgent Workspace Hardening
+
+### What's wrong
+
+`server_p2p.py:174` sets `workspace_path=Path(__file__).parent.parent` → `/home/user`.
+CodeAgent file operations are allowed anywhere under the home directory, including
+the project source itself.
+
+`_resolve_path` doesn't canonicalize symlinks before the startswith check — a
+symlink inside the workspace can point outside it.
+
+### Changes
+
+**`server_p2p.py:174`**:
+```python
+workspace = data_root() / "workspace"
+workspace.mkdir(parents=True, exist_ok=True)
+code_agent = CodeAgent("code", workspace_path=workspace, name="CodeAgent")
+```
+
+**`agents/code_agent.py:_resolve_path()`**:
+```python
+resolved = (self.workspace_path / path).resolve()   # existing
+canonical = Path(os.path.realpath(resolved))         # add: follow symlinks
+if not any(str(canonical).startswith(str(p.resolve())) for p in self.allowed_paths):
+    raise ValueError(f"Path outside workspace: {path}")
+return canonical
+```
 
 ---
 
@@ -107,50 +248,39 @@ Do not commit binaries of unknown origin into the repository.
 
 | Item | Decision | Rationale |
 |---|---|---|
-| libp2p integration | Skip; 4 tests permanently skipped | Kademlia DHT covers the same ground |
-| Real inference (torch) | Config path exists via `build_compute_handler("torch", ...)` | Requires GPU hardware |
-| Frontend XSS hardening | Defer to hardening phase | Dashboard is localhost-only |
-| Audit log wiring verification | Defer to hardening phase | Infrastructure exists |
-| Code signing | Defer to public release | Too much overhead for current phase; users can build from source |
+| libp2p integration | Skip | Kademlia DHT covers the same ground |
+| Real inference (torch) | Defer to GPU hardware | Ollama path is preferred anyway |
+| Frontend XSS hardening | Defer | Dashboard is localhost-only |
+| Audit log wiring | Defer | Infrastructure exists |
+| Code signing | Defer | Too much overhead for current phase |
+| LLM-based tool routing | After Ollama is wired | Keyword routing is sufficient for now |
+| Governance agent wiring | After P3 | Reputation-weighted consensus already runs |
+
+---
+
+## Implementation Order
+
+```
+P1 (permissions)   →  P5 (workspace)  →  P2 (task API)  →  P3 (bridge)  →  P4 (Ollama)
+   ~30 min              ~15 min            ~45 min            ~2 hrs          (deferred)
+```
+
+P1 must come first — it unblocks tool dispatch which P3 depends on.
+P5 before P2 because P2 activates CodeAgent paths that need the tighter workspace.
+P3 is the architectural core; P1 and P2 are prerequisites.
 
 ---
 
 ## How to Pick Up This Work
 
 ```bash
-# Verify clean state
 git checkout claude/review-project-codebase-WtWY3
-python -m pytest -q           # should be 435 passed, 5 skipped
+python -m pytest -q   # 435 passed, 5 skipped — baseline
 
-# Run with DHT enabled and bootstrap nodes
-PROJECT_DAWN_ENABLE_DHT=true \
-PROJECT_DAWN_BOOTSTRAP_NODES=ws://node1.example.com:8000 \
-python server_p2p.py
-
-# Add a peer manually
-./dawn peers --add ws://10.0.0.1:8000
-
-# Trigger a sensing scan (runs automatically every 60s in orchestrator loop)
-# Or check capability map directly:
-cat data/mesh/capability_map.json
-
-# Issue a seed manually (REPL)
-from agents.seed_manager import SeedManager, AgentBlueprint, GerminationConditions
-mgr = SeedManager()
-mgr.commons.accumulate(1000)
-bp = AgentBlueprint(peerId="...", logitFingerprint="...", parentId="...", generation=1)
-seed = mgr.issue(bp, compute_reserves=100)
+# After implementation, verify full loop:
+python server_p2p.py &
+curl -X POST http://127.0.0.1:9090/api/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"description": "list current peers", "taskType": "agentic"}'
+cat data/outbox/*.json
 ```
-
-The test suite is the ground truth. Phase 1 and Phase 2 are both complete. Packaging is done.
-
-## What's Left
-
-The remaining gaps are narrow:
-
-| Item | What remains |
-|---|---|
-| Real inference | Wire `build_compute_handler("torch", ...)` to a real Ollama/llama.cpp endpoint; test Proof-of-Logits with real model output. Blocked on hardware. |
-| Live two-node smoke test | Run two sidecar instances on the same LAN, exchange a real work unit, reach consensus. Tests simulate this in-process; it has not been done with actual OS processes. |
-| Platform builds | macOS + Windows sidecar binaries (PyInstaller is platform-native; needs CI runners). Linux `.deb`/`.AppImage` builds on top of current working sidecar. |
-| `libp2p_node._announce_agent()` | Stub (`pass`) in the experimental libp2p transport, feature-gated by `LIBP2P_ENABLED=true`. Low priority; default transport is fully wired. |
