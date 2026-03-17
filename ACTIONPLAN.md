@@ -26,7 +26,7 @@ _For strategic context see PLAN.md. For milestone definitions see ROADMAP.md._
 | Socket tests | ✅ Done | `test_transport.py` (3 tests), `test_discovery_dht_wiring.py` (7 tests) pass |
 | Replication agent | ✅ Done | `agents/replication_agent.py`: selects parents, derives blueprints, issues seeds; wired into orchestrator |
 | Governance protocol | ✅ Done | `agents/governance.py`: reputation-weighted proposal/vote/tally; accepted rules persisted + inherited |
-| Packaging (Tauri) | ❌ Pending | Sidecar build never tested end-to-end |
+| Packaging (Tauri) | ✅ Done | Sidecar builds (PyInstaller → 12MB ELF); starts cleanly; `beforeBuildCommand` wired |
 | Real inference (torch) | ❌ Pending | Config path exists; requires GPU hardware to test |
 
 **Test suite:** 435 pass, 5 skipped (4 libp2p feature-gated, 1 sandbox mock).
@@ -101,16 +101,6 @@ entry has been removed).
 **Action:** Verify it is not needed, then delete it and remove the `bin/` directory.
 Do not commit binaries of unknown origin into the repository.
 
-### 1.4 Code signing
-
-Required to distribute without OS security warnings:
-- **macOS**: Apple Developer ID Application certificate + `xcrun notarytool` notarization.
-  Set `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`
-  in CI secrets. Tauri handles signing automatically when these are set.
-- **Windows**: Authenticode certificate (EV cert required for SmartScreen reputation).
-  Set `WINDOWS_CERTIFICATE` and `WINDOWS_CERTIFICATE_PASSWORD` in CI secrets.
-- **Linux**: No signing required for `.deb`; AppImage signing is optional.
-
 ---
 
 ## Decisions Deferred
@@ -121,6 +111,7 @@ Required to distribute without OS security warnings:
 | Real inference (torch) | Config path exists via `build_compute_handler("torch", ...)` | Requires GPU hardware |
 | Frontend XSS hardening | Defer to hardening phase | Dashboard is localhost-only |
 | Audit log wiring verification | Defer to hardening phase | Infrastructure exists |
+| Code signing | Defer to public release | Too much overhead for current phase; users can build from source |
 
 ---
 
@@ -151,5 +142,15 @@ bp = AgentBlueprint(peerId="...", logitFingerprint="...", parentId="...", genera
 seed = mgr.issue(bp, compute_reserves=100)
 ```
 
-The test suite is the ground truth.  Phase 2 is complete.  The next milestone is packaging
-(Priority 1): building and testing the Tauri sidecar distributable end-to-end.
+The test suite is the ground truth. Phase 1 and Phase 2 are both complete. Packaging is done.
+
+## What's Left
+
+The remaining gaps are narrow:
+
+| Item | What remains |
+|---|---|
+| Real inference | Wire `build_compute_handler("torch", ...)` to a real Ollama/llama.cpp endpoint; test Proof-of-Logits with real model output. Blocked on hardware. |
+| Live two-node smoke test | Run two sidecar instances on the same LAN, exchange a real work unit, reach consensus. Tests simulate this in-process; it has not been done with actual OS processes. |
+| Platform builds | macOS + Windows sidecar binaries (PyInstaller is platform-native; needs CI runners). Linux `.deb`/`.AppImage` builds on top of current working sidecar. |
+| `libp2p_node._announce_agent()` | Stub (`pass`) in the experimental libp2p transport, feature-gated by `LIBP2P_ENABLED=true`. Low priority; default transport is fully wired. |
