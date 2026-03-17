@@ -24,6 +24,7 @@ from discovery import SovereignDiscovery
 from reputation import ReputationManager
 from communication import AgentGossip, AgentManifest
 from agents.sensing_agent import SensingAgent
+from agents.replication_agent import ReplicationAgent
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,10 @@ class Orchestrator:
         self._sensing_agent = SensingAgent(
             mesh_dir=self.mesh_dir,
             pressure_threshold=self._sensing_pressure_threshold(),
+        )
+        self._replication_agent = ReplicationAgent(
+            mesh_dir=self.mesh_dir,
+            vault_dir=self.vault_dir,
         )
 
         self._ensure_manifest()
@@ -458,10 +463,29 @@ class Orchestrator:
             cap_map = self._sensing_agent.scan()
             self._last_sensing_scan = time.time()
             if cap_map.get("evolutionary_pressure"):
+                pressure_regions = cap_map.get("pressure_regions", [])
                 logger.info(
-                    "Evolutionary pressure detected in regions: %s",
-                    cap_map.get("pressure_regions", []),
+                    "Evolutionary pressure detected in regions: %s", pressure_regions
                 )
+                # Trigger replication: issue seeds for candidate parents biased
+                # toward the capability gap identified by the SensingAgent.
+                seeds = self._replication_agent.replicate(
+                    pressure_regions=pressure_regions
+                )
+                if seeds:
+                    logger.info(
+                        "Replication cycle complete: %d seeds issued", len(seeds)
+                    )
+                # Activate any seeds whose germination conditions are now met.
+                peer_count = len(self._known_peer_ids())
+                pending_tasks = len(list(self.inbox_dir.glob("*.json")))
+                self._replication_agent.activate_ready_seeds(
+                    peer_count=peer_count,
+                    demand_signals=pending_tasks,
+                    available_compute=100,  # placeholder; real value from resource_state
+                )
+                # Cull expired seeds and return reserves.
+                self._replication_agent.cull_expired()
         except Exception as exc:
             logger.warning("SensingAgent scan failed: %s", exc)
 
