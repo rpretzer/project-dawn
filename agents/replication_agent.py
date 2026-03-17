@@ -48,6 +48,7 @@ from agents.seed_manager import (
     Seed,
     SeedManager,
 )
+from communication import AgentGossip, SeedOfferEnvelope, SEED_OFFER_PROTOCOL, SEED_OFFER_SCHEMA_VERSION
 from data_paths import data_root
 
 logger = logging.getLogger(__name__)
@@ -115,6 +116,8 @@ class ReplicationAgent(BaseAgent):
         parent_reputation_threshold: float = DEFAULT_PARENT_REPUTATION_THRESHOLD,
         seed_compute_reserves: int = DEFAULT_SEED_COMPUTE_RESERVES,
         max_seeds_per_cycle: int = MAX_SEEDS_PER_CYCLE,
+        gossip: Optional[AgentGossip] = None,
+        sensing_agent: Optional[Any] = None,
     ) -> None:
         super().__init__("replication", "ReplicationAgent", data_dir=data_dir)
         root = data_root()
@@ -123,6 +126,8 @@ class ReplicationAgent(BaseAgent):
         self.parent_reputation_threshold = parent_reputation_threshold
         self.seed_compute_reserves = seed_compute_reserves
         self.max_seeds_per_cycle = max_seeds_per_cycle
+        self.gossip = gossip
+        self.sensing_agent = sensing_agent
 
         # Derive the data root from mesh_dir so SeedManager writes to the same
         # tree as the rest of the node's state (e.g. tmp_path in tests).
@@ -130,6 +135,7 @@ class ReplicationAgent(BaseAgent):
         self._seed_manager = SeedManager(data_dir=data_root_dir)
         self._feed_path = self.mesh_dir / "agent_feed.jsonl"
         self._reputation_path = self.mesh_dir / "reputation.json"
+        self._resource_state_path = self.mesh_dir / "resource_state.json"
 
         self._register_tools()
 
@@ -233,6 +239,165 @@ class ReplicationAgent(BaseAgent):
         return culled
 
     # ------------------------------------------------------------------
+    # Seed offer protocol — sender side (Step 6)
+    # ------------------------------------------------------------------
+
+    async def propose_seed_transfer(
+        self,
+        seed_id: str,
+        target_peer_id: Optional[str] = None,
+        local_peer_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Propose a seed transfer to *target_peer_id* (or broadcast if None).
+
+        Pre-flight: checks that the target advertises seed_offer/v1.
+        On protocol mismatch: records a compatibility observation and aborts.
+
+        Returns a result dict with keys: sent (bool), reason (str).
+        """
+        if not self.gossip:
+            return {"sent": False, "reason": "no_gossip_layer"}
+
+        seed = self._seed_manager.load_seed(seed_id)
+        if not seed:
+            return {"sent": False, "reason": "seed_not_found"}
+
+        if target_peer_id:
+            supported, observed = await self.gossip.check_peer_protocol(
+                target_peer_id, SEED_OFFER_PROTOCOL
+            )
+            if not supported:
+                if self.sensing_agent:
+                    self.sensing_agent.record_compatibility_observation(
+                        peer_id=target_peer_id,
+                        observed_protocols=observed,
+                        mismatched_protocol=SEED_OFFER_PROTOCOL,
+                    )
+                self._emit_feed_event(
+                    event_type="seed_offer_aborted",
+                    seed_id=seed_id,
+                    target_peer_id=target_peer_id,
+                    reason="protocol_mismatch",
+                    observed_protocols=observed,
+                )
+                return {"sent": False, "reason": "protocol_mismatch", "observed": observed}
+
+        blueprint = seed.blueprint
+        envelope = SeedOfferEnvelope(
+            schemaVersion=SEED_OFFER_SCHEMA_VERSION,
+            seedId=seed_id,
+            senderPeerId=local_peer_id,
+            blueprintSummary={
+                "peerId": blueprint.peerId,
+                "parentId": blueprint.parentId,
+                "generation": blueprint.generation,
+                "logitFingerprint": blueprint.logitFingerprint,
+            },
+            capabilityDeclarations=blueprint.capabilityDeclarations,
+            germinationConditions=seed.germinationConditions.to_dict(),
+            blueprintSignature="",  # TODO: sign with node key when signer available
+            timestamp=time.time(),
+        )
+
+        sent = await self.gossip.propose_seed_offer(envelope)
+        if sent:
+            self._emit_feed_event(
+                event_type="seed_offer_sent",
+                seed_id=seed_id,
+                target_peer_id=target_peer_id,
+            )
+        return {"sent": sent, "reason": "ok" if sent else "dht_error"}
+
+    # ------------------------------------------------------------------
+    # Seed offer protocol — receiver side (Step 7)
+    # ------------------------------------------------------------------
+
+    def evaluate_seed_offer(
+        self, envelope: SeedOfferEnvelope
+    ) -> tuple:
+        """
+        Evaluate an incoming seed offer against the three consent layers.
+
+        Returns (accept: bool, reason: str).
+
+        Consent layers (all required):
+          1. schemaVersion must be known
+          2. Sender reputation >= parent_reputation_threshold
+          3. Capability declarations intersect pressure_regions in capability_map
+          4. Resource state is not throttled
+        """
+        if envelope.schemaVersion != SEED_OFFER_SCHEMA_VERSION:
+            return False, "schema_version_unsupported"
+
+        # Layer 1: reputation gate
+        reputation = _load_reputation(self._reputation_path)
+        sender_score = reputation.get(envelope.senderPeerId, 0.0)
+        if sender_score < self.parent_reputation_threshold:
+            return False, f"reputation_too_low:{sender_score:.2f}"
+
+        # Layer 2: capability gap alignment
+        if not self._check_capability_gap(envelope.capabilityDeclarations):
+            return False, "no_capability_gap_alignment"
+
+        # Layer 3: resource state
+        if not self._check_resource_available():
+            return False, "resource_throttled"
+
+        return True, "accepted"
+
+    def _check_capability_gap(self, declarations: List[str]) -> bool:
+        """Return True if any declaration matches a current pressure region type."""
+        cap_map_path = self.mesh_dir / "capability_map.json"
+        if not cap_map_path.exists():
+            # No map yet — accept on capability grounds (can't detect a gap to fill).
+            return True
+        try:
+            cap_map = json.loads(cap_map_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return True
+        pressure_regions = cap_map.get("pressure_regions", [])
+        if not pressure_regions:
+            return False
+        # pressure_regions are task-region hex keys; declarations are capability
+        # type strings.  We accept if the network is under any pressure at all
+        # and the offer brings relevant capabilities.
+        # Phase 2: use embedding-space proximity for finer matching.
+        return bool(declarations)
+
+    def _check_resource_available(self) -> bool:
+        """Return True if the local node is not currently throttled."""
+        if not self._resource_state_path.exists():
+            return True
+        try:
+            state = json.loads(self._resource_state_path.read_text(encoding="utf-8"))
+            return not state.get("throttle", False)
+        except (json.JSONDecodeError, OSError):
+            return True
+
+    async def receive_seed_payload(
+        self, seed_id: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Receive and store a full seed payload after accepting an offer.
+
+        Verifies schemaVersion, then delegates storage to SeedManager.receive_external().
+        Returns a result dict with keys: stored (bool), reason (str).
+        """
+        version = payload.get("schemaVersion", 0)
+        if version != SEED_OFFER_SCHEMA_VERSION:
+            return {"stored": False, "reason": "schema_version_unsupported"}
+
+        stored = self._seed_manager.receive_external(seed_id, payload)
+        if stored:
+            self._emit_feed_event(
+                event_type="seed_received",
+                seed_id=seed_id,
+                received_from=payload.get("senderPeerId", "unknown"),
+            )
+        return {"stored": stored, "reason": "ok" if stored else "storage_failed"}
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -290,6 +455,25 @@ class ReplicationAgent(BaseAgent):
 
     def _register_tools(self) -> None:
         self.register_tool(
+            "propose_seed_transfer",
+            "Propose a P2P seed transfer to a specific peer or broadcast to all compatible peers.",
+            self._tool_propose_seed_transfer,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "seed_id": {
+                        "type": "string",
+                        "description": "ID of the seed to offer.",
+                    },
+                    "target_peer_id": {
+                        "type": "string",
+                        "description": "Peer to offer the seed to (optional; broadcast if omitted).",
+                    },
+                },
+                "required": ["seed_id"],
+            },
+        )
+        self.register_tool(
             "trigger_replication",
             "Manually trigger a replication cycle.  Issues seeds for candidate parents.",
             self._tool_trigger_replication,
@@ -324,6 +508,13 @@ class ReplicationAgent(BaseAgent):
             self._tool_get_commons_balance,
             inputSchema={"type": "object", "properties": {}},
         )
+
+    async def _tool_propose_seed_transfer(
+        self,
+        seed_id: str,
+        target_peer_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await self.propose_seed_transfer(seed_id, target_peer_id)
 
     def _tool_trigger_replication(self, capability_hint: Optional[str] = None) -> Dict[str, Any]:
         seeds = self.replicate(capability_hint=capability_hint)

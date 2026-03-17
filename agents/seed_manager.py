@@ -478,6 +478,53 @@ class SeedManager:
             logger.warning("Failed to load seed %s: %s", seed_id[:16], exc)
             return None
 
+    # Alias used by ReplicationAgent for clarity.
+    load_seed = load
+
+    def receive_external(self, seed_id: str, payload: Dict[str, Any]) -> bool:
+        """
+        Store a seed received via the P2P seed offer protocol.
+
+        This is distinct from issue() — externally-received seeds are not
+        backed by the local commons pool and carry a provenance record
+        (receivedFrom, receivedAt) so the lineage chain remains auditable.
+
+        The payload is expected to contain a full serialised Seed dict plus
+        provenance fields added by the sender:
+          - schemaVersion  (already verified by caller)
+          - senderPeerId
+          - receivedAt     (optional; defaults to now)
+
+        Returns True if the seed was stored successfully.
+        """
+        try:
+            seed = Seed.from_dict(payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning("receive_external: malformed seed payload for %s: %s", seed_id[:16], exc)
+            return False
+
+        # Augment the on-disk record with provenance so the lineage is traceable.
+        seed_dict = seed.to_dict()
+        seed_dict["provenance"] = {
+            "receivedFrom": payload.get("senderPeerId", "unknown"),
+            "receivedAt": payload.get("receivedAt", time.time()),
+            "source": "p2p_offer",
+        }
+
+        path = self._seeds_dir / f"{seed_id}.json"
+        try:
+            _write_atomic(path, seed_dict)
+        except OSError as exc:
+            logger.error("receive_external: failed to write seed %s: %s", seed_id[:16], exc)
+            return False
+
+        logger.info(
+            "External seed stored: seedId=%s from=%s",
+            seed_id[:16],
+            payload.get("senderPeerId", "unknown")[:16],
+        )
+        return True
+
     def list_seeds(self, status: Optional[str] = None) -> List[Seed]:
         """List all seeds, optionally filtered by status."""
         seeds = []

@@ -172,6 +172,12 @@ class SensingAgent(BaseAgent):
             round(total_failures / total_attempts, 4) if total_attempts else 0.0
         )
 
+        # Preserve existing compatibility observations across scans — they are
+        # written by record_compatibility_observation() and must not be wiped
+        # each time the task-space map is refreshed.
+        existing = self.load_capability_map() or {}
+        compatibility = existing.get("compatibility", {})
+
         capability_map: Dict[str, Any] = {
             "version": CAPABILITY_MAP_VERSION,
             "timestamp": time.time(),
@@ -184,6 +190,7 @@ class SensingAgent(BaseAgent):
                 "overall_failure_rate": overall_failure_rate,
             },
             "regions": {key: stats.to_dict() for key, stats in sorted(regions.items())},
+            "compatibility": compatibility,
         }
 
         self._write_atomic(self.capability_map_path, capability_map)
@@ -204,6 +211,43 @@ class SensingAgent(BaseAgent):
         if cap_map is None:
             return False
         return bool(cap_map.get("evolutionary_pressure"))
+
+    def record_compatibility_observation(
+        self,
+        peer_id: str,
+        observed_protocols: List[str],
+        mismatched_protocol: str,
+    ) -> None:
+        """
+        Record that *peer_id* does not support *mismatched_protocol*.
+
+        Written into the ``compatibility`` section of capability_map.json so
+        the network can learn which peers speak which protocols over time.
+        The entry is keyed by a 16-char peer ID prefix to bound map size.
+        """
+        cap_map = self.load_capability_map() or {}
+        compatibility: Dict[str, Any] = cap_map.get("compatibility", {})
+        key = peer_id[:16]
+        entry = compatibility.get(key, {
+            "peerId": peer_id,
+            "protocols": [],
+            "mismatches": [],
+            "lastSeen": 0.0,
+        })
+        # Merge observed protocols (avoid duplicates).
+        known = set(entry.get("protocols", []))
+        known.update(observed_protocols)
+        entry["protocols"] = sorted(known)
+        # Record the mismatch if not already noted.
+        mismatches = set(entry.get("mismatches", []))
+        mismatches.add(mismatched_protocol)
+        entry["mismatches"] = sorted(mismatches)
+        entry["lastSeen"] = time.time()
+        compatibility[key] = entry
+
+        cap_map["compatibility"] = compatibility
+        self.capability_map_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_atomic(self.capability_map_path, cap_map)
 
     # ------------------------------------------------------------------
     # MCP tool registration

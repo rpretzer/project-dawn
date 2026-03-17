@@ -22,7 +22,7 @@ from data_paths import data_root
 from compute import generate_proof_of_logits, generate_action_proof, persist_work_result, synthetic_logits_provider
 from discovery import SovereignDiscovery
 from reputation import ReputationManager
-from communication import AgentGossip, AgentManifest
+from communication import AgentGossip, AgentManifest, SEED_OFFER_PROTOCOL
 from agents.sensing_agent import SensingAgent
 from agents.replication_agent import ReplicationAgent
 
@@ -111,7 +111,11 @@ class Orchestrator:
         self._replication_agent = ReplicationAgent(
             mesh_dir=self.mesh_dir,
             vault_dir=self.vault_dir,
+            gossip=self.gossip,
+            sensing_agent=self._sensing_agent,
         )
+        # Track seed offer IDs we have already evaluated to avoid re-processing.
+        self._seen_seed_offer_ids: set = set()
 
         self._ensure_manifest()
         self._load_persistent_state()
@@ -491,6 +495,71 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("SensingAgent scan failed: %s", exc)
 
+    async def _poll_seed_protocol(self) -> None:
+        """
+        Poll for incoming seed offers, evaluate consent, respond, and store
+        accepted payloads.  Called each iteration of the main run loop.
+
+        Skips offers already in self._seen_seed_offer_ids so we don't
+        re-evaluate the same envelope on every poll cycle.
+        """
+        try:
+            offers = await self.gossip.poll_seed_offers(
+                known_ids=self._seen_seed_offer_ids
+            )
+        except Exception as exc:
+            logger.debug("_poll_seed_protocol: poll_seed_offers failed: %s", exc)
+            return
+
+        for envelope in offers:
+            self._seen_seed_offer_ids.add(envelope.seedId)
+            accept, reason = self._replication_agent.evaluate_seed_offer(envelope)
+
+            # Write the response to the DHT so the sender can read it.
+            dht = self.discovery.get_dht()
+            if dht:
+                response = {
+                    "schemaVersion": 1,
+                    "seedId": envelope.seedId,
+                    "accept": accept,
+                    "reason": reason,
+                    "responderId": self.peer_id,
+                    "timestamp": __import__("time").time(),
+                }
+                try:
+                    await dht.store(
+                        f"seed_response:{envelope.seedId}",
+                        response,
+                        ttl=3600.0,
+                    )
+                except Exception as exc:
+                    logger.warning("_poll_seed_protocol: failed to write response: %s", exc)
+
+            if not accept:
+                logger.info(
+                    "Seed offer %s rejected: %s", envelope.seedId[:16], reason
+                )
+                continue
+
+            # Accepted — retrieve and store the full payload.
+            try:
+                payload = await self.gossip.poll_seed_response(
+                    f"seed_payload:{envelope.seedId}"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "_poll_seed_protocol: failed to fetch payload for %s: %s",
+                    envelope.seedId[:16], exc,
+                )
+                continue
+
+            if payload:
+                result = await self._replication_agent.receive_seed_payload(
+                    envelope.seedId, payload
+                )
+                if result.get("stored"):
+                    logger.info("Seed %s stored from peer offer.", envelope.seedId[:16])
+
     async def _maybe_broadcast_handshake(self) -> None:
         if time.time() - self._last_handshake < HANDSHAKE_INTERVAL_SECONDS:
             return
@@ -751,11 +820,13 @@ class Orchestrator:
             peer_id=self.peer_id,
             status="online",
             capabilities=["compute", "proof-of-logits"],
+            protocols=[SEED_OFFER_PROTOCOL],
         )
         try:
             while self._running:
                 await self._maybe_broadcast_handshake()
                 await self._maybe_sensing_scan()
+                await self._poll_seed_protocol()
                 await self.run_once()
                 await self.sync_peer_results_from_dht()
                 await self.sync_handshakes()
