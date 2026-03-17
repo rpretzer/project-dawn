@@ -1,6 +1,6 @@
 # ACTIONPLAN.md — Project Dawn
 
-_Concrete next steps, ordered by priority. Updated after session M6 (2026-03-17)._
+_Concrete next steps, ordered by priority. Updated after session work through Phase 2 seeds._
 _For strategic context see PLAN.md. For milestone definitions see ROADMAP.md._
 
 ---
@@ -11,224 +11,144 @@ _For strategic context see PLAN.md. For milestone definitions see ROADMAP.md._
 |---|---|---|
 | Proof validation | ✅ Done | `orchestrator.py:validate_local_proof()` uses real Ed25519 verification |
 | Reputation gossip | ✅ Done | `reputation.py:sync_reputation()` uses weighted-average merge |
-| Atomic writes | ✅ Done | fsync + rename in orchestrator, SensingAgent, and all persistence paths |
+| Atomic writes | ✅ Done | fsync + rename in orchestrator, SensingAgent, SeedManager, all persistence paths |
 | Compute config | ✅ Done | `build_compute_handler()` factory; `synthetic`/`torch`; config-driven |
-| DHT in-process | ✅ Done | `p2p/dht.py` tested with full Kademlia routing; `_wire_mesh()` integration tests pass |
+| DHT in-process | ✅ Done | `p2p/dht.py` tested with full Kademlia routing |
+| DHT real-socket wiring | ✅ Done | `P2PNode._handle_dht_rpc()` routes outbound over WebSocket; inbound in `_handle_node_method` |
+| DHT bridge (orchestrator) | ✅ Done | `server_p2p.py` replaces orchestrator DHT with P2PNode DHT when `enable_dht=True` |
+| Discovery routing-table seeding | ✅ Done | `SovereignDiscovery.record_peer()` calls `dht.add_node()`; `set_dht()` seeds from known peers |
+| Bootstrap discovery | ✅ Done | Real `node/get_info` WebSocket handshake; placeholder fallback for unreachable nodes |
+| Bootstrap CLI | ✅ Done | `./dawn peers --add ws://host:port` |
 | AgentManifest lineage | ✅ Done | `parentId`, `generation`, `from_dict()`; `vault/lineage.json` on genesis |
-| SensingAgent | ✅ Done | Scans consensus + failed → `capability_map.json`; 24 tests pass |
+| SensingAgent | ✅ Done | Scans consensus + failed → `capability_map.json`; wired into orchestrator loop |
+| Seed protocol | ✅ Done | `agents/seed_manager.py`: `SeedManager`, `CommonsPool`, full lifecycle + tests |
 | DoS hardening | ✅ Done | 1 MB message limit; trust-first; rate limiter wired to WebSocket |
-| DHT over real sockets | ❌ Pending | `P2PNode._handle_dht_rpc()` is not implemented |
-| Bootstrap nodes | ❌ Pending | No WAN discovery for first-time nodes |
-| `requirements.txt` fix | ❌ Pending | Line 30: `psutil>=5.9.0docker>=6.1.0` (two packages merged) |
-| Socket test fixes | ❌ Pending | `test_transport.py` and `test_host.py` are collected but not verified live |
-| SensingAgent wired to loop | ❌ Pending | `orchestrator.py` doesn't call `sensing_agent.scan()` yet |
-| Seed protocol | ❌ Pending | Phase 2 item 3; schema and dormancy logic not built |
+| Socket tests | ✅ Done | `test_transport.py` (3 tests), `test_discovery_dht_wiring.py` (7 tests) pass |
+| Replication agent | ❌ Pending | Phase 2 item 4: triggered by sensing signal, coordinates seed issuance |
+| Governance protocol | ❌ Pending | Phase 2 item 5: reputation-weighted vote + rule propagation |
 | Packaging (Tauri) | ❌ Pending | Sidecar build never tested end-to-end |
+| Real inference (torch) | ❌ Pending | Config path exists; requires GPU hardware to test |
 
-**Test suite:** 336 pass, 5 skipped (4 libp2p feature-gated, 1 sandbox mock).
-
----
-
-## Priority 1 — Immediate Fixes (unblock everything)
-
-### 1.1 Fix `requirements.txt` line 30
-**File:** `requirements.txt:30`
-```
-# Change:
-psutil>=5.9.0docker>=6.1.0
-# To:
-psutil>=5.9.0
-docker>=6.1.0
-```
-This silently breaks `pip install` on some pip versions. Fix before any fresh environment setup.
-
-### 1.2 Wire SensingAgent into orchestrator background loop
-**File:** `orchestrator.py`
-
-`SensingAgent` exists but is never called. Add a background task to `Orchestrator.__init__`
-or `start()` that runs `sensing_agent.scan()` on a configurable interval (default: 60s).
-
-```python
-# In orchestrator.py — add to __init__:
-self._sensing_agent = SensingAgent(
-    mesh_dir=self.mesh_dir,
-    pressure_threshold=self.config.get("sensing", {}).get("pressure_threshold", 0.7),
-)
-```
-
-Then in the background task loop, call `self._sensing_agent.scan()` and log the result.
-No action needed beyond scanning — the SensingAgent writes `capability_map.json` itself.
+**Test suite:** 381 pass, 5 skipped (4 libp2p feature-gated, 1 sandbox mock).
 
 ---
 
-## Priority 2 — DHT Real-Socket Transport (Developer Alpha gate)
+## Priority 1 — Replication Agent (Phase 2, item 4)
 
-This is the largest remaining gap. The DHT is correct but only tested in-process.
-Real node-to-node discovery over WAN requires wiring it to the WebSocket transport.
+Prerequisites are complete: SensingAgent detects pressure, AgentManifest has lineage fields,
+SeedManager issues/activates/culls seeds with commons pool accounting.
 
-### 2.1 Implement `P2PNode._handle_dht_rpc()`
-**File:** `p2p/p2p_node.py`
+The replication agent closes the loop: sensing signal → candidate parent selection → seed issuance.
 
-This method receives an inbound DHT RPC message from the WebSocket transport and dispatches
-it to the local `discovery._dht` node. The response is sent back over the same WebSocket.
+### 1.1 Define the replication trigger protocol
 
-```python
-async def _handle_dht_rpc(self, peer_id: str, message: dict) -> dict:
-    """
-    Dispatch an incoming DHT RPC message to the local DHT node and return the response.
-    Called from the WebSocket message handler when msg["type"] == "dht_rpc".
-    """
-    # message: {"type": "dht_rpc", "method": "find_node"|"store"|"find_value", "params": {...}}
-    # Return: {"type": "dht_rpc_response", "result": {...}}
-```
-
-Route to `discovery._dht.handle_rpc(message)` — the DHT already has internal dispatch logic;
-this method just bridges the WebSocket layer to it.
-
-### 2.2 Wire `discovery.start()` with the transport handler
-**File:** `server_p2p.py`
-
-At startup, pass the transport handler so outbound DHT messages go through the encrypted
-WebSocket channel:
+When `SensingAgent.scan()` returns `evolutionary_pressure = True`, the orchestrator should
+emit a replication signal to the mesh.  The signal is a DHT broadcast:
 
 ```python
-await discovery.start(
-    rpc_handler=lambda peer_id, msg: p2p_node.send_message(peer_id, msg)
-)
-```
-
-The `rpc_handler` signature is already defined in `p2p/dht.py` — it just needs to be set.
-
-### 2.3 Add message type routing in WebSocket handler
-**File:** `p2p/p2p_node.py`
-
-In the inbound message handler, add a branch for `"dht_rpc"` type messages:
-```python
-elif msg_type == "dht_rpc":
-    response = await self._handle_dht_rpc(sender_id, message)
-    await self.send_message(sender_id, response)
-```
-
-### 2.4 Fix socket tests
-**Files:** `tests/test_transport.py`, `tests/test_host.py`
-
-These tests are collected but their actual socket operations may not exercise the DHT path.
-After 2.1–2.3, verify they pass and add a `test_dht_over_socket` test that:
-- Starts two `P2PNode` instances on localhost (different ports)
-- Node A calls `discovery.dht_store(key, value)`
-- Node B calls `discovery.dht_find_value(key)` and gets the value back
-
----
-
-## Priority 3 — Bootstrap / Seed Nodes
-
-Without this, a node starting fresh has no way to find peers outside its local network.
-
-### 3.1 Add `bootstrap_nodes` to config
-**File:** `config/default.yaml`
-
-```yaml
-discovery:
-  bootstrap_nodes: []   # list of "host:port" strings; empty = local-only
-  bootstrap_timeout_seconds: 30
-```
-
-### 3.2 Bootstrap sequence in `discovery.py`
-**File:** `discovery.py`
-
-On startup, if `bootstrap_nodes` is non-empty:
-1. Connect to each bootstrap node via WebSocket
-2. Send a `find_node(self.node_id)` DHT RPC to populate the routing table
-3. Log the discovered peers
-
-### 3.3 CLI: `./dawn peers --add <address>`
-**File:** `dawn` (CLI entry point)
-
-Let operators manually add a peer address to bootstrap from. Useful for private meshes
-before public bootstrap nodes exist.
-
----
-
-## Priority 4 — Phase 2: Seed Protocol
-
-Prerequisites: Priority 2 complete, core loop validated on real hardware.
-
-### 4.1 Define seed schema
-**File:** `data/seeds/{seed_id}.json` (new)
-
-```json
-{
-  "seedId": "sha256-based UUID",
-  "blueprint": {
-    "peerId": "...",
-    "logitFingerprint": "...",
-    "parentId": "...",
-    "generation": 1,
-    "capabilityDeclarations": ["text-inference", "..."]
-  },
-  "computeReserves": 100,
-  "germinationConditions": {
-    "minPeerDensity": 3,
-    "minDemandSignals": 5,
-    "availableComputeUnits": 50
-  },
-  "issuedAt": "ISO8601",
-  "expiresAt": "ISO8601"
+key = f"replication_signal:{timestamp_bucket}"
+value = {
+    "pressureRegions": cap_map["pressure_regions"],
+    "triggerTime": time.time(),
+    "originPeerId": self.peer_id,
 }
+await dht.store(key, value, ttl=3600)
 ```
 
-### 4.2 Commons pool accounting
-**File:** `data/mesh/commons.json` (new)
+### 1.2 Implement `ReplicationAgent` (`agents/replication_agent.py`)
 
-Accumulates compute credits from successful consensus receipts. Tracks:
-- `totalAccumulated` — all-time credits earned by the mesh
-- `currentBalance` — available for seed issuance
-- `seedAllocations` — list of issued seeds and their reserve amounts
+**Trigger:** `SensingAgent.is_under_pressure()` returns True.
 
-### 4.3 `SeedManager` class
-**File:** `agents/seed_manager.py` (new)
+**Algorithm:**
+1. Load `data/mesh/reputation.json` — find peers with reputation ≥ threshold (default 0.7)
+2. Among those, identify candidates closest to pressure regions (by capability intersection)
+3. For each candidate, generate a child `AgentBlueprint`:
+   - `parentId` = candidate's `peerId`
+   - `generation` = candidate's `generation` + 1
+   - `logitFingerprint` = variant of parent's fingerprint (see §1.3)
+   - `capabilityDeclarations` = biased toward the pressure region's capability type
+4. Call `SeedManager.issue(blueprint, compute_reserves)` for each candidate
+5. Broadcast seed issuance to mesh via DHT
 
-Responsibilities:
-- Issue seeds when evolutionary trigger fires (called by replication agent)
-- Check germination conditions against current network state
-- Activate dormant seeds when conditions are met
-- Cull seeds that fail their germination window; return reserves to commons
+**File:** `agents/replication_agent.py`
+
+### 1.3 Logit fingerprint inheritance
+
+From CLAUDE.md: "The logit fingerprint is heritable genetic material."
+Children should have related but variant fingerprints.
+
+Simple implementation:
+```python
+def _child_fingerprint(parent_fingerprint: str, generation: int) -> str:
+    raw = f"{parent_fingerprint}:gen{generation}:{uuid.uuid4()}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+```
+
+The distance between two fingerprints (edit distance or XOR of their SHA256 prefixes)
+is their evolutionary distance.  The lineage chain is cryptographically traceable via
+`vault/lineage.json` → `parentId` chain.
+
+### 1.4 Wire germination checker into orchestrator loop
+
+After `_maybe_sensing_scan()`, check whether any dormant seeds can be activated:
+
+```python
+# In orchestrator.py run() loop:
+await self._maybe_activate_seeds()
+```
+
+`_maybe_activate_seeds()` calls `SeedManager.check_germination_conditions()` for each
+dormant seed using current peer count and demand signals from the inbox queue.
 
 ---
 
-## Priority 5 — Packaging (Public Beta gate)
+## Priority 2 — Governance Protocol (Phase 2, item 5)
 
-### 5.1 Fix Python sidecar build
+**Not started.** Depends on: working mesh with multiple nodes (Priority 1 complete,
+real hardware test).
+
+High-level design (from CLAUDE.md):
+
+1. Any agent with sufficient reputation can propose a rule change
+2. Proposal is broadcast to the mesh as a DHT entry
+3. Peers vote (weight = their reputation score at vote time)
+4. If weighted approval ≥ threshold (default 0.66), the rule is accepted
+5. Accepted rules are propagated to all agents and encoded into future seeds
+
+**Schema:** `data/mesh/governance/` — pending proposals, votes, accepted rules.
+
+---
+
+## Priority 3 — Packaging (Public Beta gate)
+
+### 3.1 Fix Python sidecar build
 **File:** `scripts/build_python_sidecar.py`
 
 Build script exists but has never produced a tested distributable. Run it, fix failures.
 Output must include SHA-256 checksum that matches what `src-tauri/` verifies.
 
-### 5.2 Platform builds
+### 3.2 Platform builds
 Test on macOS first. Then Linux (`.deb` / `.AppImage`). Then Windows (`.msi`).
 For each platform:
 - Build runs to completion without `continue-on-error: true`
 - Installer launches without OS security warnings (requires code signing)
 - Node starts, generates identity, finds local peers
 
-### 5.3 Code signing
-- macOS: Apple Developer ID + notarization (required to bypass Gatekeeper)
-- Windows: Authenticode certificate (required to bypass SmartScreen)
-- Linux: AppImage signing (optional but good practice)
+### 3.3 Code signing
+- macOS: Apple Developer ID + notarization
+- Windows: Authenticode certificate
+- Linux: AppImage signing (optional)
 
 ---
 
 ## Decisions Deferred
 
-These are known issues that are not on the critical path to Developer Alpha:
-
 | Item | Decision | Rationale |
 |---|---|---|
-| libp2p integration | Skip for now; 4 tests permanently skipped | Adds significant complexity; Kademlia DHT covers the same ground |
-| Real inference (torch) | Config path exists via `build_compute_handler("torch", ...)` | Requires GPU hardware; not testable in current env |
-| Frontend XSS hardening | Defer to Milestone 7 | Dashboard is localhost-only; risk is low until public release |
-| Audit log wiring verification | Defer to Milestone 7 | Infrastructure exists; correctness matters more before hardening |
-| CRDT sync | `test_system.py::test_crdt_synchronization` passes; no known issues | |
+| libp2p integration | Skip; 4 tests permanently skipped | Kademlia DHT covers the same ground |
+| Real inference (torch) | Config path exists via `build_compute_handler("torch", ...)` | Requires GPU hardware |
+| Frontend XSS hardening | Defer to hardening phase | Dashboard is localhost-only |
+| Audit log wiring verification | Defer to hardening phase | Infrastructure exists |
 
 ---
 
@@ -237,16 +157,27 @@ These are known issues that are not on the critical path to Developer Alpha:
 ```bash
 # Verify clean state
 git checkout claude/review-project-codebase-WtWY3
-python -m pytest -q           # should be 336 passed, 5 skipped
+python -m pytest -q           # should be 381 passed, 5 skipped
 
-# Fix requirements first (P1.1)
-sed -i 's/psutil>=5.9.0docker>=6.1.0/psutil>=5.9.0\ndocker>=6.1.0/' requirements.txt
-pip install -r requirements.txt
+# Run with DHT enabled and bootstrap nodes
+PROJECT_DAWN_ENABLE_DHT=true \
+PROJECT_DAWN_BOOTSTRAP_NODES=ws://node1.example.com:8000 \
+python server_p2p.py
 
-# Wire SensingAgent (P1.2) — then run tests again
-# Implement DHT socket transport (P2.1–2.3) — then run tests again
-# Add bootstrap nodes (P3) — then test with two Docker containers on same host
+# Add a peer manually
+./dawn peers --add ws://10.0.0.1:8000
+
+# Trigger a sensing scan (runs automatically every 60s in orchestrator loop)
+# Or check capability map directly:
+cat data/mesh/capability_map.json
+
+# Issue a seed manually (REPL)
+from agents.seed_manager import SeedManager, AgentBlueprint, GerminationConditions
+mgr = SeedManager()
+mgr.commons.accumulate(1000)
+bp = AgentBlueprint(peerId="...", logitFingerprint="...", parentId="...", generation=1)
+seed = mgr.issue(bp, compute_reserves=100)
 ```
 
-The test suite is the ground truth. If `pytest -q` is green, the in-process behavior is correct.
-The next major milestone requires real sockets.
+The test suite is the ground truth.  The next major milestone is the replication agent
+(Priority 1 above) which closes the Phase 2 loop: sensing → replication → germination → culling.
