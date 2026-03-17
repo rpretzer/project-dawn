@@ -206,6 +206,38 @@ def cmd_peers(json_output: bool = False):
         sys.exit(1)
 
 
+def cmd_peers_add(address: str):
+    """
+    Manually add a peer address to the bootstrap list.
+
+    Attempts a WebSocket handshake (node/get_info) to learn the peer's
+    real node_id and writes the result to data/mesh/peers.json via
+    SovereignDiscovery.record_peer().  Works whether or not the server
+    is currently running.
+    """
+    import asyncio as _asyncio
+    from data_paths import data_root
+    from discovery import SovereignDiscovery
+    from p2p.discovery import _handshake_bootstrap_node
+
+    mesh_dir = data_root() / "mesh"
+    disc = SovereignDiscovery(data_dir=mesh_dir)
+
+    async def _add():
+        peer = await _handshake_bootstrap_node(address)
+        if peer:
+            disc.record_peer(peer.node_id, peer.address, ["/project-dawn/1.0"])
+            print_success(f"Added peer: {peer.node_id[:16]}... @ {peer.address}")
+        else:
+            # Address unreachable — record with placeholder so it's tried at next startup.
+            import hashlib
+            placeholder_id = hashlib.sha256(address.encode()).hexdigest()
+            disc.record_peer(placeholder_id, address, ["/project-dawn/1.0"])
+            print_info(f"Peer unreachable now; saved {address} for next startup")
+
+    _asyncio.run(_add())
+
+
 def cmd_agents(json_output: bool = False):
     """List registered agents"""
     # Ensure server is running
@@ -415,10 +447,14 @@ if TYPER_AVAILABLE:
     
     @app.command()
     def peers(
-        json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON")
+        json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+        add: Optional[str] = typer.Option(None, "--add", help="Add a bootstrap peer address (ws://host:port)")
     ):
-        """List connected peers"""
-        cmd_peers(json_output)
+        """List connected peers, or add one with --add ws://host:port"""
+        if add:
+            cmd_peers_add(add)
+        else:
+            cmd_peers(json_output)
     
     @app.command()
     def agents(

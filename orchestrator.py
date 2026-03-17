@@ -23,6 +23,7 @@ from compute import generate_proof_of_logits, persist_work_result, synthetic_log
 from discovery import SovereignDiscovery
 from reputation import ReputationManager
 from communication import AgentGossip, AgentManifest
+from agents.sensing_agent import SensingAgent
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ RESULT_TTL_SECONDS = 60 * 60
 CONSENSUS_TTL_SECONDS = 60 * 60
 PROCESSED_RETENTION_SECONDS = 24 * 60 * 60
 HANDSHAKE_INTERVAL_SECONDS = 60.0
+SENSING_SCAN_INTERVAL_SECONDS = 60.0
 DHT_BACKOFF_MIN_SECONDS = 2.0
 DHT_BACKOFF_MAX_SECONDS = 60.0
 MAX_TASK_ATTEMPTS = 3
@@ -98,6 +100,11 @@ class Orchestrator:
         self._task_attempts: Dict[str, int] = {}
         self._handshakes: Dict[str, Dict[str, Any]] = {}
         self._last_handshake = 0.0
+        self._last_sensing_scan = 0.0
+        self._sensing_agent = SensingAgent(
+            mesh_dir=self.mesh_dir,
+            pressure_threshold=self._sensing_pressure_threshold(),
+        )
 
         self._ensure_manifest()
         self._load_persistent_state()
@@ -430,6 +437,34 @@ class Orchestrator:
             await asyncio.sleep(self._dht_backoff)
             self._dht_backoff = min(self._dht_backoff * 2, DHT_BACKOFF_MAX_SECONDS)
 
+    def _sensing_pressure_threshold(self) -> float:
+        try:
+            from config.config import get_config
+            return float(get_config().sensing.get("pressure_threshold", 0.7))
+        except Exception:
+            return 0.7
+
+    def _sensing_scan_interval(self) -> float:
+        try:
+            from config.config import get_config
+            return float(get_config().sensing.get("scan_interval_seconds", SENSING_SCAN_INTERVAL_SECONDS))
+        except Exception:
+            return SENSING_SCAN_INTERVAL_SECONDS
+
+    async def _maybe_sensing_scan(self) -> None:
+        if time.time() - self._last_sensing_scan < self._sensing_scan_interval():
+            return
+        try:
+            cap_map = self._sensing_agent.scan()
+            self._last_sensing_scan = time.time()
+            if cap_map.get("evolutionary_pressure"):
+                logger.info(
+                    "Evolutionary pressure detected in regions: %s",
+                    cap_map.get("pressure_regions", []),
+                )
+        except Exception as exc:
+            logger.warning("SensingAgent scan failed: %s", exc)
+
     async def _maybe_broadcast_handshake(self) -> None:
         if time.time() - self._last_handshake < HANDSHAKE_INTERVAL_SECONDS:
             return
@@ -608,6 +643,7 @@ class Orchestrator:
         try:
             while self._running:
                 await self._maybe_broadcast_handshake()
+                await self._maybe_sensing_scan()
                 await self.run_once()
                 await self.sync_peer_results_from_dht()
                 await self.sync_handshakes()

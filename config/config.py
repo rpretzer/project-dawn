@@ -47,6 +47,11 @@ class Config:
             "data_root": os.getenv("PROJECT_DAWN_DATA_ROOT", default_data_dir),
         }
         
+        self.network = {
+            "bootstrap_nodes": [],
+            "enable_dht": os.getenv("PROJECT_DAWN_ENABLE_DHT", "false").lower() == "true",
+        }
+
         self.security = {
             "trust_level_default": os.getenv("PROJECT_DAWN_TRUST_LEVEL", "UNKNOWN"),
             "reject_unknown": os.getenv("PROJECT_DAWN_REJECT_UNKNOWN", "false").lower() == "true",
@@ -83,6 +88,11 @@ class Config:
             "top_k": int(os.getenv("PROJECT_DAWN_TOP_K", "5")),
         }
 
+        self.sensing = {
+            "scan_interval_seconds": int(os.getenv("PROJECT_DAWN_SENSING_INTERVAL", "60")),
+            "pressure_threshold": float(os.getenv("PROJECT_DAWN_PRESSURE_THRESHOLD", "0.7")),
+        }
+
         # Override with provided config data
         if config_data:
             self._merge_config(config_data)
@@ -113,8 +123,12 @@ class Config:
             self.logging = merge_dict(self.logging, config_data["logging"])
         if "observability" in config_data:
             self.observability = merge_dict(self.observability, config_data["observability"])
+        if "network" in config_data:
+            self.network = merge_dict(self.network, config_data["network"])
         if "compute" in config_data:
             self.compute = merge_dict(self.compute, config_data["compute"])
+        if "sensing" in config_data:
+            self.sensing = merge_dict(self.sensing, config_data["sensing"])
     
     def _apply_env_overrides(self) -> None:
         """Apply environment variable overrides"""
@@ -144,11 +158,13 @@ class Config:
         """Convert configuration to dictionary"""
         return {
             "node": self.node,
+            "network": self.network,
             "security": self.security,
             "resilience": self.resilience,
             "logging": self.logging,
             "observability": self.observability,
             "compute": self.compute,
+            "sensing": self.sensing,
         }
     
     def validate(self) -> bool:

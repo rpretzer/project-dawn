@@ -47,3 +47,11 @@ compute:
   seed: 0
   sample_rate: 0.1
   top_k: 5
+
+sensing:
+  # How often (seconds) the orchestrator triggers a SensingAgent scan.
+  scan_interval_seconds: 60
+
+  # Failure-rate threshold (0.0–1.0) above which a task region is flagged as
+  # under evolutionary pressure.  Requires at least 3 attempts in the region.
+  pressure_threshold: 0.7

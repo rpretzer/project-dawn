@@ -27,6 +27,57 @@ except ImportError:
     ZEROCONF_AVAILABLE = False
     logger.debug("zeroconf not available, mDNS discovery disabled")
 
+try:
+    import websockets as _ws_lib
+    WEBSOCKETS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    WEBSOCKETS_AVAILABLE = False
+
+_BOOTSTRAP_TIMEOUT = 5.0  # seconds to wait for a bootstrap handshake
+
+
+async def _handshake_bootstrap_node(address: str) -> Optional[Peer]:
+    """
+    Connect to *address* via WebSocket, send a ``node/get_info`` request,
+    and return a :class:`Peer` populated with the remote node's real node_id.
+
+    Returns ``None`` if the node is unreachable, times out, or returns an
+    unexpected response.
+
+    Protocol (matches ``P2PNode._handle_node_method`` "node/get_info"):
+        → {"jsonrpc":"2.0","method":"node/get_info","params":{},"id":"bootstrap"}
+        ← {"jsonrpc":"2.0","result":{"node_id":"...","address":"..."},"id":"bootstrap"}
+    """
+    if not WEBSOCKETS_AVAILABLE:
+        logger.debug("websockets library not available; cannot handshake %s", address)
+        return None
+
+    import json as _json
+    import hashlib as _hashlib
+
+    request = _json.dumps({
+        "jsonrpc": "2.0",
+        "method": "node/get_info",
+        "params": {},
+        "id": "bootstrap",
+    })
+    try:
+        async with asyncio.timeout(_BOOTSTRAP_TIMEOUT):
+            async with _ws_lib.connect(address) as ws:
+                await ws.send(request)
+                async with asyncio.timeout(_BOOTSTRAP_TIMEOUT):
+                    raw = await ws.recv()
+                msg = _json.loads(raw)
+                result = msg.get("result", {})
+                node_id = result.get("node_id")
+                if not node_id:
+                    logger.warning("Bootstrap node/get_info missing node_id from %s", address)
+                    return None
+                return Peer(node_id=node_id, address=address)
+    except Exception as exc:
+        logger.debug("Bootstrap handshake failed for %s: %s", address, exc)
+        return None
+
 
 class BootstrapDiscovery:
     """
@@ -49,35 +100,32 @@ class BootstrapDiscovery:
     
     async def discover(self) -> List[Peer]:
         """
-        Discover peers via bootstrap nodes
-        
+        Connect to each bootstrap address, request the node's real node_id via
+        ``node/get_info``, and register it in the peer registry.
+
+        If a node is unreachable, a placeholder entry (sha256(address)) is
+        recorded anyway so the address is retried at the next startup.
+
         Returns:
-            List of discovered peers
+            List of discovered peers (one per bootstrap address).
         """
+        import hashlib as _hl
         discovered_peers = []
-        
-        for bootstrap_address in self.bootstrap_nodes:
-            try:
-                # Try to connect and get peer list
-                # In a real implementation, this would:
-                # 1. Connect to bootstrap node
-                # 2. Request peer list
-                # 3. Add peers to registry
-                
-                # For now, create a peer entry for the bootstrap node itself
-                # In production, bootstrap node would return list of peers
-                peer = Peer(
-                    node_id=f"bootstrap_{hash(bootstrap_address)}",
-                    address=bootstrap_address,
+        for address in self.bootstrap_nodes:
+            peer = await _handshake_bootstrap_node(address)
+            if peer:
+                logger.info("Bootstrap peer identified: node_id=%s address=%s",
+                            peer.node_id[:16], address)
+            else:
+                # Node is down or unreachable; record placeholder so the address
+                # stays in the peer cache and is retried at next startup.
+                placeholder_id = _hl.sha256(address.encode()).hexdigest()
+                peer = Peer(node_id=placeholder_id, address=address)
+                logger.warning(
+                    "Bootstrap node unreachable (placeholder recorded): %s", address
                 )
-                self.peer_registry.add_peer(peer)
-                discovered_peers.append(peer)
-                
-                logger.debug(f"Discovered bootstrap peer: {bootstrap_address}")
-            
-            except Exception as e:
-                logger.warning(f"Failed to discover from bootstrap {bootstrap_address}: {e}")
-        
+            self.peer_registry.add_peer(peer)
+            discovered_peers.append(peer)
         return discovered_peers
 
 

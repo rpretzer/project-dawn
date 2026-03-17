@@ -133,9 +133,12 @@ async def main():
     identity = _load_persistent_identity(data_dir)
     logger.info(f"Node ID: {identity.get_node_id()[:16]}...")
 
-    # Bootstrap nodes: comma-separated ws://host:port list via env var.
+    # Bootstrap nodes: prefer config file, fall back to env var.
+    cfg_bootstrap = get_config().network.get("bootstrap_nodes", []) if hasattr(get_config(), "network") else []
     _bootstrap_env = os.getenv("PROJECT_DAWN_BOOTSTRAP_NODES", "").strip()
-    bootstrap_nodes = [n.strip() for n in _bootstrap_env.split(",") if n.strip()] or None
+    _env_bootstrap = [n.strip() for n in _bootstrap_env.split(",") if n.strip()]
+    # Merge: env var overrides, then config, deduplicated in order.
+    bootstrap_nodes = list(dict.fromkeys(_env_bootstrap + cfg_bootstrap)) or None
 
     # DHT: opt-in via env var (recommended once the network has multiple nodes).
     enable_dht = os.getenv("PROJECT_DAWN_ENABLE_DHT", "false").lower() == "true"
@@ -244,6 +247,26 @@ async def main():
             mdns_service_name="project-dawn-orchestrator",
             compute_handler=compute_handler,
         )
+        # Bootstrap: seed the orchestrator's peer cache from any configured
+        # bootstrap nodes so the DHT routing table is populated before the
+        # first compute task arrives.
+        if bootstrap_nodes:
+            asyncio.create_task(
+                orchestrator.discovery.bootstrap(bootstrap_nodes),
+                name="bootstrap-discovery",
+            )
+
+        # When DHT is enabled, share the P2PNode's DHT with the Orchestrator so
+        # both layers use a single routing table and rpc_handler.  The P2PNode's
+        # DHT already has rpc_handler wired to its encrypted WebSocket transport;
+        # the Orchestrator's DHT defaults to None (local-only).  After this bridge,
+        # orchestrator.broadcast_peer_result() and fetch_peer_results() reach remote peers.
+        if enable_dht:
+            p2p_dht = node.discovery.get_dht()
+            if p2p_dht:
+                orchestrator.discovery.set_dht(p2p_dht)
+                logger.info("DHT bridge: Orchestrator now shares P2PNode DHT instance")
+
         orchestrator_task = asyncio.create_task(orchestrator.run())
         logger.info("Orchestrator loop started")
     else:

@@ -142,6 +142,8 @@ class SovereignDiscovery:
         )
         self._peers[peer_id] = record
         self._save_cache()
+        if self._dht:
+            self._dht.add_node(peer_id, address)
         return True
 
     def list_peer_nodes(self) -> List[Dict[str, Any]]:
@@ -203,6 +205,57 @@ class SovereignDiscovery:
 
     def get_dht(self) -> Optional[DHT]:
         return self._dht
+
+    def set_dht(self, dht: DHT) -> None:
+        """Replace the DHT instance.  Used by server_p2p to share a single
+        DHT (and its rpc_handler) between the P2PNode and the Orchestrator."""
+        self._dht = dht
+        # Seed the new DHT with any peers already known to this node.
+        for record in self._peers.values():
+            dht.add_node(record.peerId, record.address)
+
+    async def bootstrap(
+        self,
+        addresses: List[str],
+        timeout: float = 5.0,
+    ) -> List[str]:
+        """
+        Seed the routing table from a list of known bootstrap addresses.
+
+        For each address, attempt a ``node/get_info`` WebSocket handshake to
+        learn the peer's real node_id, then record the peer (which also seeds
+        the DHT routing table via ``record_peer``).  After all addresses are
+        tried, run ``discover_peers_dht()`` to propagate through the network.
+
+        Returns a list of node_ids successfully bootstrapped from.
+        """
+        from p2p.discovery import _handshake_bootstrap_node
+
+        seeded: List[str] = []
+        for address in addresses:
+            try:
+                peer = await _handshake_bootstrap_node(address)
+            except Exception as exc:
+                logger.debug("Bootstrap handshake failed for %s: %s", address, exc)
+                peer = None
+
+            if peer:
+                self.record_peer(
+                    peer_id=peer.node_id,
+                    address=peer.address,
+                    protocols=[self.protocol_prefix],
+                )
+                seeded.append(peer.node_id)
+                logger.info(
+                    "Bootstrapped from %s (node_id=%s...)", address, peer.node_id[:16]
+                )
+            else:
+                logger.warning("Bootstrap node unreachable: %s", address)
+
+        if seeded and self._dht:
+            await self.discover_peers_dht()
+
+        return seeded
 
     async def discover_peers_dht(self, target_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if not self._dht:
