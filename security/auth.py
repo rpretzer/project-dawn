@@ -163,25 +163,23 @@ class AuthManager:
             self.node_permissions[node_id].discard(permission)
             logger.debug(f"Revoked {permission.value} from {node_id[:16]}...")
 
-    def has_permission(self, node_id: str, permission: Permission) -> bool:
+    def has_permission(self, node_id: Optional[str], permission: Permission) -> bool:
         """
-        Check if a node has a permission
-        
-        Args:
-            node_id: Node ID
-            permission: Permission to check
-            
-        Returns:
-            True if node has permission
+        Check if a node has a permission.
+
+        A None or empty node_id indicates a call originating from the local
+        process (no network sender).  Local calls are always permitted.
         """
-        # Check node permissions
+        # Local / in-process calls have full permissions.
+        if not node_id:
+            return True
+
+        # Check explicitly granted permissions.
         if node_id in self.node_permissions:
             perms = self.node_permissions[node_id]
             if permission in perms or Permission.SYSTEM_ADMIN in perms:
                 return True
-        
-        # Default permissions for local node
-        # Local node has all permissions
+
         return False
 
     def check_permission(self, node_id: str, permission: Permission) -> bool:

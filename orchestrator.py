@@ -19,7 +19,7 @@ from crypto.signing import (
     MessageSigner,
 )
 from data_paths import data_root
-from compute import generate_proof_of_logits, persist_work_result, synthetic_logits_provider
+from compute import generate_proof_of_logits, generate_action_proof, persist_work_result, synthetic_logits_provider
 from discovery import SovereignDiscovery
 from reputation import ReputationManager
 from communication import AgentGossip, AgentManifest
@@ -54,6 +54,7 @@ class Orchestrator:
         mdns_port: Optional[int] = None,
         mdns_service_name: Optional[str] = None,
         enable_mdns: bool = True,
+        coord_agent: Optional[Any] = None,
     ):
         self.data_dir = data_dir or data_root()
         self.vault_dir = self.data_dir / "vault"
@@ -93,6 +94,7 @@ class Orchestrator:
         self.enable_mdns = enable_mdns
 
         self.compute_handler = compute_handler or self.default_compute_handler
+        self._coord_agent = coord_agent  # Optional CoordinationAgent for agentic tasks
         self._running = False
         self._last_throttled: Optional[bool] = None
         self._poll_jitter = 0.25
@@ -551,6 +553,13 @@ class Orchestrator:
 
     @staticmethod
     def _verify_proof_signature(entry: Dict[str, Any], public_key_bytes: bytes) -> bool:
+        """
+        Verify an Ed25519 signature for either proof shape:
+
+        - logit_proof:  payload = "<index>:<logitHash>:<timestamp>"
+        - action proof: payload = "<taskId>:<tool>:<resultHash>"
+        """
+        import json as _json
         signature_hex = entry.get("nodeSignature")
         if not signature_hex:
             return False
@@ -558,9 +567,18 @@ class Orchestrator:
             signature = bytes.fromhex(signature_hex)
         except ValueError:
             return False
-        payload = f"{entry.get('index')}:{entry.get('logitHash')}:{entry.get('timestamp')}".encode("utf-8")
-        from crypto.signing import MessageSigner
 
+        if entry.get("proofType") == "action":
+            # Action proof — reconstruct the result hash payload.
+            task_id = entry.get("taskId", "")
+            tool = entry.get("tool", "")
+            result_hash = entry.get("resultHash", "")
+            payload = f"{task_id}:{tool}:{result_hash}".encode("utf-8")
+        else:
+            # Logit proof (default)
+            payload = f"{entry.get('index')}:{entry.get('logitHash')}:{entry.get('timestamp')}".encode("utf-8")
+
+        from crypto.signing import MessageSigner
         return MessageSigner.verify_with_public_key_bytes(payload, signature, public_key_bytes)
 
     def cleanup_stale_files(self) -> None:
@@ -576,6 +594,72 @@ class Orchestrator:
         if active_tasks:
             self._processed_results = {task_id: peers for task_id, peers in self._processed_results.items() if task_id in active_tasks}
             self._save_processed_results()
+
+    async def _agentic_handler(self, work_unit: WorkUnit) -> ProofList:
+        """
+        Handle a work unit with taskType == 'agentic'.
+
+        Routes the task description through the CoordinationAgent, signs the
+        result as an action proof, and returns a single-entry ProofList.  Two
+        peers running the same deterministic tool on the same task will produce
+        identical resultHashes, satisfying the 2-of-3 consensus check.
+
+        Falls back to default_compute_handler if no coord_agent is wired in.
+        """
+        if self._coord_agent is None:
+            logger.warning("Agentic task received but no CoordinationAgent wired; using synthetic proof")
+            return self.default_compute_handler(work_unit)
+
+        description = work_unit.get("description", "")
+        task_id = work_unit.get("taskId", "unknown")
+
+        if not description:
+            raise ValueError("Agentic work unit missing 'description' field")
+
+        # Route the task through keyword matching to the right local tool.
+        # This is intentionally simple for now; LLM-based routing replaces it
+        # once Ollama is wired.
+        tool_name, tool_params = self._route_description_to_tool(description)
+
+        try:
+            response = await self._coord_agent._agent_call(
+                target=tool_name.split("/")[0],  # agent_id part
+                method=tool_name.split("/")[1] if "/" in tool_name else tool_name,
+                params=tool_params,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Agentic tool call failed: {exc}") from exc
+
+        result = response.get("result") if isinstance(response, dict) else response
+        signer = MessageSigner(self.identity)
+        proof = generate_action_proof(
+            task_id=task_id,
+            tool_name=tool_name,
+            result=result,
+            signer=signer,
+        )
+        return [proof]
+
+    def _route_description_to_tool(self, description: str):
+        """
+        Map a free-text task description to a (tool_name, params) pair.
+
+        Keyword routing: simple and deterministic.  Replaced by LLM-driven
+        routing once a real model is wired.  Returns (agent_id/tool, params).
+        """
+        desc = description.lower()
+        if any(k in desc for k in ("peer", "peers", "connected", "network")):
+            return "coordinator/agent_list", {}
+        if any(k in desc for k in ("seed", "seeds", "replicate", "replication")):
+            return "coordinator/agent_call", {
+                "target": "replication", "method": "list_seeds", "params": {}
+            }
+        if any(k in desc for k in ("capability", "pressure", "sensing", "map")):
+            return "coordinator/agent_call", {
+                "target": "replication", "method": "get_pressure_report", "params": {}
+            }
+        # Default: ask the coordinator to list agents
+        return "coordinator/agent_list", {}
 
     def default_compute_handler(self, work_unit: WorkUnit) -> ProofList:
         input_blob = work_unit.get("inputBlob", {})
@@ -639,7 +723,11 @@ class Orchestrator:
                 return None
 
         try:
-            proofs = self.compute_handler(work_unit)
+            task_type = work_unit.get("taskType", "logit_proof")
+            if task_type == "agentic":
+                proofs = await self._agentic_handler(work_unit)
+            else:
+                proofs = self.compute_handler(work_unit)
         except Exception as exc:
             if task_id:
                 self._task_attempts[task_id] = self._task_attempts.get(task_id, 0) + 1

@@ -4,16 +4,23 @@ HTTP API Server
 Provides HTTP endpoints for metrics, health checks, and monitoring.
 """
 
+import hashlib
 import json
 import logging
+import os
+import tempfile
 import threading
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
+from data_paths import data_root
 from metrics import register_metrics, get_metrics_collector
 from health import HealthChecker, HealthStatus
+
+_KNOWN_TASK_TYPES = {"logit_proof", "agentic"}
+_DEFAULT_TTL = 300  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,84 @@ class APIHandler(BaseHTTPRequestHandler):
         self.health_checker = health_checker or HealthChecker()
         super().__init__(*args, **kwargs)
     
+    def do_POST(self):
+        """Handle POST requests"""
+        parsed_path = urlparse(self.path)
+        path = parsed_path.path
+
+        if path == "/api/tasks":
+            self._handle_submit_task()
+        else:
+            self._handle_not_found()
+
+    def _handle_submit_task(self):
+        """POST /api/tasks — accept a work unit and write it to the inbox."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                self._send_json_response(400, {"error": "Invalid JSON"})
+                return
+
+            description = payload.get("description", "").strip()
+            if not description:
+                self._send_json_response(400, {"error": "'description' is required"})
+                return
+
+            task_type = payload.get("taskType", "agentic")
+            if task_type not in _KNOWN_TASK_TYPES:
+                self._send_json_response(400, {
+                    "error": f"Unknown taskType '{task_type}'; must be one of {sorted(_KNOWN_TASK_TYPES)}"
+                })
+                return
+
+            ttl = float(payload.get("ttl", _DEFAULT_TTL))
+            now = time.time()
+            task_id = hashlib.sha256(
+                f"{description}:{now}".encode()
+            ).hexdigest()[:16]
+
+            # Derive requester peer ID from node if available
+            requester = payload.get("requesterPeerId", "")
+            if not requester and self.node:
+                requester = getattr(self.node, "node_id", "")
+
+            work_unit = {
+                "taskId": task_id,
+                "taskType": task_type,
+                "description": description,
+                "requesterPeerId": requester,
+                "expiresAt": now + ttl,
+                "inputBlob": payload.get("inputBlob", {}),
+            }
+
+            # Atomic write: tmp → fsync → rename
+            inbox_dir = data_root() / "mesh" / "inbox"
+            inbox_dir.mkdir(parents=True, exist_ok=True)
+            target = inbox_dir / f"{task_id}.json"
+            fd, tmp_path = tempfile.mkstemp(dir=inbox_dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(work_unit, fh)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, target)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+            logger.info("Task accepted: %s (type=%s)", task_id, task_type)
+            self._send_json_response(202, {"taskId": task_id, "accepted": True})
+
+        except Exception as exc:
+            logger.error("Error handling task submission: %s", exc, exc_info=True)
+            self._send_json_response(500, {"error": str(exc)})
+
     def do_GET(self):
         """Handle GET requests"""
         parsed_path = urlparse(self.path)
@@ -182,7 +267,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self._send_json_response(404, {
             "error": "Not Found",
             "message": f"Endpoint {self.path} not found",
-            "available_endpoints": ["/metrics", "/health", "/health/ready", "/health/live"],
+            "available_endpoints": ["/metrics", "/health", "/health/ready", "/health/live", "POST /api/tasks"],
         })
     
     def _send_json_response(self, status_code: int, data: Dict[str, Any]):

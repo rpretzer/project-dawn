@@ -171,7 +171,9 @@ async def main():
     
     # Create and register code agent (Phase 3 tools, resources, prompts)
     from agents.code_agent import CodeAgent
-    code_agent = CodeAgent("code", workspace_path=Path(__file__).parent.parent, name="CodeAgent")
+    _workspace = data_root() / "workspace"
+    _workspace.mkdir(parents=True, exist_ok=True)
+    code_agent = CodeAgent("code", workspace_path=_workspace, name="CodeAgent")
     node.register_agent("code", code_agent.server, agent_instance=code_agent)
     logger.info(f"Registered code agent: {code_agent.name} with {len(code_agent.get_tools())} tools, {len(code_agent.server.get_resources())} resources, {len(code_agent.server.get_prompts())} prompts")
     
@@ -246,6 +248,7 @@ async def main():
             mdns_port=ws_port,
             mdns_service_name="project-dawn-orchestrator",
             compute_handler=compute_handler,
+            coord_agent=coord_agent,
         )
         # Bootstrap: seed the orchestrator's peer cache from any configured
         # bootstrap nodes so the DHT routing table is populated before the

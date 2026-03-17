@@ -26,6 +26,7 @@ from consensus.task_registry import DistributedTaskRegistry
 from llm.config import load_config, save_config
 from llm.ollama import list_models_async, chat_async
 from security import TrustManager, PeerValidator, AuthManager, Permission, AuditLogger, AuditEventType
+from security.trust import TrustLevel
 from metrics import register_metrics
 from resilience.rate_limit import RateLimiter, RateLimitConfig
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig
@@ -1070,12 +1071,26 @@ class P2PNode:
             })
     
     async def _on_client_connect(self, client_id: Any) -> None:
-        """Handle client connection"""
+        """Handle client connection — grant AGENT_EXECUTE to peers that pass trust check."""
         logger.debug(f"Client connected: {client_id}")
-    
+        if isinstance(client_id, str) and client_id:
+            self._maybe_grant_agent_execute(client_id)
+
     async def _on_client_disconnect(self, client_id: Any) -> None:
-        """Handle client disconnection"""
+        """Handle client disconnection — revoke runtime permissions."""
         logger.debug(f"Client disconnected: {client_id}")
+        if isinstance(client_id, str) and client_id:
+            self.auth_manager.revoke_permission(client_id, Permission.AGENT_EXECUTE)
+
+    def _maybe_grant_agent_execute(self, peer_id: str) -> None:
+        """Grant AGENT_EXECUTE to a peer whose trust level is VERIFIED or higher."""
+        _qualifying = {TrustLevel.VERIFIED, TrustLevel.TRUSTED, TrustLevel.BOOTSTRAP}
+        level = self.trust_manager.get_trust_level(peer_id)
+        if level in _qualifying:
+            self.auth_manager.grant_permission(peer_id, Permission.AGENT_EXECUTE)
+            logger.info("Granted AGENT_EXECUTE to %s... (trust=%s)", peer_id[:16], level.value)
+        else:
+            logger.debug("Peer %s... trust=%s — AGENT_EXECUTE not granted", peer_id[:16], level.value)
     
     async def _broadcast_gossip_announcement(self, announcement: Dict[str, Any]) -> None:
         """Broadcast gossip announcement to connected peers"""

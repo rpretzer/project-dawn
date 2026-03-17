@@ -249,6 +249,41 @@ def build_compute_handler(
     )
 
 
+def generate_action_proof(
+    task_id: str,
+    tool_name: str,
+    result: Any,
+    signer: "MessageSigner",
+) -> Dict[str, Any]:
+    """
+    Generate a signed proof for an agentic tool-call result.
+
+    Unlike Proof-of-Logits (which attests to logit values at sampled token
+    positions), an action proof attests to the *outcome* of a tool call:
+
+        payload = "<taskId>:<toolName>:<json-sorted-result>"
+        resultHash = sha256(payload)
+        nodeSignature = Ed25519.sign(payload)
+
+    Two peers independently running the same deterministic tool on the same
+    task should produce identical resultHashes.  The 2-of-3 consensus check
+    compares resultHashes the same way it compares logitHashes.
+    """
+    result_json = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    payload = f"{task_id}:{tool_name}:{result_json}"
+    payload_bytes = payload.encode("utf-8")
+    result_hash = hashlib.sha256(payload_bytes).hexdigest()
+    signature = signer.sign(payload_bytes)
+    return {
+        "taskId": task_id,
+        "proofType": "action",
+        "tool": tool_name,
+        "resultHash": result_hash,
+        "nodeSignature": signature.hex(),
+        "timestamp": int(time.time()),
+    }
+
+
 def wrap_work_result(
     task_id: str,
     peer_id: str,

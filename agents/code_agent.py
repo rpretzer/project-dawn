@@ -427,17 +427,24 @@ class CodeAgent(BaseAgent):
         Raises:
             ValueError: If path is outside allowed workspace
         """
-        # Convert to Path
+        # Resolve to an absolute path (follows symlinks during .resolve())
         if os.path.isabs(path):
-            resolved = Path(path)
+            resolved = Path(path).resolve()
         else:
             resolved = (self.workspace_path / path).resolve()
-        
-        # Check if path is within allowed workspace
-        if not any(str(resolved).startswith(str(allowed)) for allowed in self.allowed_paths):
-            raise ValueError(f"Path {path} is outside allowed workspace")
-        
-        return resolved
+
+        # Canonicalise: follow any remaining symlinks so a symlink inside the
+        # workspace pointing outside is caught before the prefix check.
+        canonical = Path(os.path.realpath(resolved))
+
+        allowed_roots = [Path(os.path.realpath(p)) for p in self.allowed_paths]
+        if not any(
+            str(canonical) == str(root) or str(canonical).startswith(str(root) + os.sep)
+            for root in allowed_roots
+        ):
+            raise ValueError(f"Path outside workspace: {path!r}")
+
+        return canonical
     
     # Tool Handlers
     

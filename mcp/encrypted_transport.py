@@ -454,6 +454,7 @@ class EncryptedWebSocketServer:
         self.enable_encryption = enable_encryption
         self.signer = MessageSigner(identity) if identity.can_sign() else None
         self.message_handler = message_handler
+        self.on_connect = on_connect  # app-layer callback fired post-handshake with peer_node_id
         self.peer_registry = peer_registry
         self.trust_manager = trust_manager
         self.peer_validator = peer_validator
@@ -596,6 +597,13 @@ class EncryptedWebSocketServer:
                 response["signature"] = signature.hex()
             
             logger.info(f"Key exchange complete with {client_node_id[:16]}")
+
+            # Notify the application layer that a peer with a known node_id has
+            # completed the handshake.  Pass the resolved node_id so the P2PNode
+            # can make trust-based permission decisions.
+            if self.on_connect:
+                await self.on_connect(client_node_id)
+
             return json.dumps(response)
         
         except Exception as e:
