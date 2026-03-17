@@ -306,10 +306,21 @@ class SeedManager:
         self._seeds_dir = root / SEEDS_DIR
         self._seeds_dir.mkdir(parents=True, exist_ok=True)
         self.commons = CommonsPool(root)
+        self._accepted_rules_path = root / "mesh" / "governance" / "accepted_rules.json"
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def _load_accepted_rules(self) -> Dict[str, Any]:
+        """Load the current accepted governance ruleset, or {} if none yet."""
+        if not self._accepted_rules_path.exists():
+            return {}
+        try:
+            raw = json.loads(self._accepted_rules_path.read_text(encoding="utf-8"))
+            return raw.get("rules", raw)
+        except Exception:
+            return {}
 
     def issue(
         self,
@@ -324,9 +335,29 @@ class SeedManager:
         Derives a deterministic seed_id from the blueprint, allocates
         *compute_reserves* from the commons pool, and writes the seed to disk.
 
+        Governance inheritance: the current accepted ruleset is merged into
+        blueprint.governingValues before the seed is issued so that all
+        children carry the network's conserved genome at the time of their
+        creation.  Caller-supplied values take precedence over the ruleset
+        (allowing the caller to override specific rules for specialised seeds).
+
         Returns the Seed if successful, None if the commons pool has
         insufficient credits.
         """
+        # Inherit governing rules — accepted rules are the conserved genome.
+        accepted = self._load_accepted_rules()
+        if accepted:
+            merged = {**accepted, **blueprint.governingValues}
+            blueprint = AgentBlueprint(
+                peerId=blueprint.peerId,
+                logitFingerprint=blueprint.logitFingerprint,
+                parentId=blueprint.parentId,
+                generation=blueprint.generation,
+                capabilityDeclarations=blueprint.capabilityDeclarations,
+                governingValues=merged,
+                protocolContracts=blueprint.protocolContracts,
+            )
+
         seed_id = _derive_seed_id(blueprint)
         if not self.commons.allocate(seed_id, compute_reserves):
             logger.warning(
@@ -502,6 +533,19 @@ class SeedManager:
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning("receive_external: malformed seed payload for %s: %s", seed_id[:16], exc)
             return False
+
+        # Governance compatibility check: warn if the received seed is missing
+        # rules that are locally accepted.  We do not reject — the remote node
+        # may be operating under a different governance epoch — but we log so
+        # the operator is aware.
+        local_rules = self._load_accepted_rules()
+        seed_rules = seed.blueprint.governingValues
+        missing = [k for k in local_rules if k not in seed_rules]
+        if missing:
+            logger.warning(
+                "receive_external: seed %s is missing %d locally-accepted rule(s): %s",
+                seed_id[:16], len(missing), missing,
+            )
 
         # Augment the on-disk record with provenance so the lineage is traceable.
         seed_dict = seed.to_dict()

@@ -415,3 +415,208 @@ class GovernanceManager:
         votes.append(vote)
         path = self._votes_dir / f"{vote.proposalId}.json"
         _write_atomic(path, {"votes": [v.to_dict() for v in votes]})
+
+
+# ---------------------------------------------------------------------------
+# GovernanceAgent — MCP wrapper + DHT integration
+# ---------------------------------------------------------------------------
+
+class GovernanceAgent:
+    """
+    Wraps GovernanceManager and connects it to the DHT gossip layer.
+
+    Responsibilities:
+    - Expose MCP tools: submit_proposal, cast_vote, list_proposals,
+      get_accepted_rules
+    - poll(): called from the orchestrator run loop; fetches proposals and
+      votes from the DHT, runs tally, broadcasts accepted rules when a
+      proposal passes
+    - Auto-vote: if *auto_vote* is True, the agent casts its own vote on
+      every pending proposal it encounters, weighted by *local_reputation*.
+      The vote is always "approve" by default (conservative bootstrap
+      behaviour — the agent trusts the submitter's reputation gate to screen
+      out bad proposals).  Override by subclassing and overriding
+      _should_approve().
+
+    The agent intentionally does NOT implement its own periodic loop.  The
+    orchestrator calls poll() at a configurable interval (see
+    GOVERNANCE_POLL_SECONDS in orchestrator.py) so that timing is
+    controlled from one place.
+    """
+
+    def __init__(
+        self,
+        peer_id: str,
+        gossip: Any,                          # AgentGossip — imported lazily to avoid circular import
+        reputation_manager: Any,              # ReputationManager
+        data_dir: Optional[Path] = None,
+        auto_vote: bool = True,
+        proposal_reputation_threshold: float = DEFAULT_PROPOSAL_REPUTATION_THRESHOLD,
+        acceptance_threshold: float = DEFAULT_ACCEPTANCE_THRESHOLD,
+    ):
+        self.peer_id = peer_id
+        self.gossip = gossip
+        self.reputation_manager = reputation_manager
+        self.auto_vote = auto_vote
+
+        self.manager = GovernanceManager(
+            data_dir=data_dir,
+            proposal_reputation_threshold=proposal_reputation_threshold,
+            acceptance_threshold=acceptance_threshold,
+        )
+
+        # Proposal IDs already processed this session (avoid reprocessing).
+        self._seen_proposal_ids: set = set()
+
+    # ------------------------------------------------------------------
+    # Public tools (called by MCP or orchestrator directly)
+    # ------------------------------------------------------------------
+
+    def submit_proposal(
+        self,
+        rule_key: str,
+        proposed_value: Any,
+        rationale: str = "",
+    ) -> Optional[Proposal]:
+        """
+        Submit a governance proposal as this node.
+
+        Reputation-gated: uses the node's own current reputation score.
+        Returns the Proposal object, or None if the reputation gate blocks it.
+        """
+        rep = self.reputation_manager.get_peer(self.peer_id)
+        score = rep.reputationScore if rep else 0.0
+        return self.manager.submit_proposal(
+            proposer_id=self.peer_id,
+            proposer_reputation=score,
+            rule_key=rule_key,
+            proposed_value=proposed_value,
+            rationale=rationale,
+        )
+
+    def cast_vote(
+        self,
+        proposal_id: str,
+        approve: bool,
+        rationale: str = "",
+    ) -> bool:
+        """Cast a vote on an existing proposal, weighted by this node's reputation."""
+        rep = self.reputation_manager.get_peer(self.peer_id)
+        score = rep.reputationScore if rep else 0.0
+        return self.manager.cast_vote(
+            proposal_id=proposal_id,
+            voter_id=self.peer_id,
+            voter_reputation=score,
+            approve=approve,
+            rationale=rationale,
+        )
+
+    def get_accepted_rules(self) -> Dict[str, Any]:
+        return self.manager.get_accepted_rules()
+
+    def list_proposals(self, status: Optional[str] = None) -> List[Proposal]:
+        return self.manager.list_proposals(status=status)
+
+    # ------------------------------------------------------------------
+    # DHT integration — called from orchestrator run loop
+    # ------------------------------------------------------------------
+
+    async def poll(self) -> Dict[str, Any]:
+        """
+        One poll cycle:
+        1. Fetch new proposals from DHT via gossip.poll_proposals().
+        2. For each new proposal: ingest it into GovernanceManager.
+        3. Collect votes from peers for all pending proposals.
+        4. Run tally().
+        5. Broadcast accepted rules if any proposals were accepted.
+        6. Broadcast this node's votes for any new proposals (auto_vote).
+
+        Returns a summary dict: {"ingested": N, "voted": N, "accepted": [...]}
+        """
+        ingested = 0
+        voted = 0
+
+        # --- Step 1: Fetch new proposals ---
+        new_raw = await self.gossip.poll_proposals(known_ids=self._seen_proposal_ids)
+        for raw_proposal in new_raw:
+            pid = raw_proposal.get("proposalId", "")
+            self._seen_proposal_ids.add(pid)
+            # Ingest into manager if it doesn't already exist.
+            if not self.manager.load_proposal(pid):
+                try:
+                    p = Proposal.from_dict(raw_proposal)
+                    # Trust the remote proposal's metadata; bypass the local
+                    # reputation gate since the submitter's gate was enforced
+                    # at submission time on their node.
+                    self.manager._save_proposal(p)
+                    ingested += 1
+                    logger.info(
+                        "Ingested remote proposal: %s key=%s", pid[:16], p.ruleKey
+                    )
+                except (KeyError, TypeError) as exc:
+                    logger.warning("Malformed remote proposal: %s", exc)
+
+        # --- Step 2: Collect peer votes ---
+        peer_ids = self.gossip.list_trusted_peers(min_score=0.0)
+        for proposal in self.manager.list_proposals(status="pending"):
+            peer_votes = await self.gossip.poll_votes(proposal.proposalId, peer_ids)
+            for raw_vote in peer_votes:
+                try:
+                    v = Vote.from_dict(raw_vote)
+                    if v.voterId != self.peer_id:  # don't overwrite our own vote
+                        self.manager._save_vote(v)
+                except (KeyError, TypeError) as exc:
+                    logger.warning("Malformed remote vote: %s", exc)
+
+        # --- Step 3: Auto-vote on new proposals ---
+        if self.auto_vote:
+            for proposal in self.manager.list_proposals(status="pending"):
+                if not self._has_voted(proposal.proposalId):
+                    approve = self._should_approve(proposal)
+                    if self.cast_vote(proposal.proposalId, approve=approve):
+                        # Broadcast our vote to the DHT.
+                        rep = self.reputation_manager.get_peer(self.peer_id)
+                        score = rep.reputationScore if rep else 0.0
+                        await self.gossip.broadcast_vote({
+                            "proposalId": proposal.proposalId,
+                            "voterId": self.peer_id,
+                            "voterReputation": score,
+                            "approve": approve,
+                            "votedAt": time.time(),
+                        })
+                        voted += 1
+
+        # --- Step 4: Tally ---
+        result = self.manager.tally()
+        accepted_ids: List[str] = result.get("accepted", [])
+
+        # --- Step 5: Broadcast accepted rules ---
+        if accepted_ids:
+            rules = self.manager.get_accepted_rules()
+            await self.gossip.broadcast_accepted_rules(rules, self.peer_id)
+            logger.info(
+                "Governance tally: accepted=%s rejected=%s expired=%s",
+                accepted_ids, result.get("rejected", []), result.get("expired", []),
+            )
+
+        return {
+            "ingested": ingested,
+            "voted": voted,
+            "accepted": accepted_ids,
+            "rejected": result.get("rejected", []),
+            "expired": result.get("expired", []),
+        }
+
+    def _has_voted(self, proposal_id: str) -> bool:
+        votes = self.manager.get_votes(proposal_id)
+        return any(v.voterId == self.peer_id for v in votes)
+
+    def _should_approve(self, proposal: "Proposal") -> bool:  # noqa: F821
+        """
+        Default approval policy: approve everything (conservative bootstrap).
+
+        Override this method to implement domain-specific voting logic,
+        e.g. reject proposals that would lower the acceptance_threshold
+        below a safety floor, or that come from low-reputation peers.
+        """
+        return True

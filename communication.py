@@ -16,6 +16,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 SEED_OFFER_PROTOCOL = "seed_offer/v1"
 SEED_OFFER_SCHEMA_VERSION = 1
 
+GOVERNANCE_PROTOCOL = "governance/v1"
+GOVERNANCE_SCHEMA_VERSION = 1
+
 from crypto.signing import MessageSigner
 from data_paths import data_root
 from discovery import SovereignDiscovery
@@ -347,6 +350,166 @@ class AgentGossip:
                     logger.warning("Malformed seed_offer payload: %s", exc)
 
         return offers
+
+    # ------------------------------------------------------------------
+    # Governance protocol (Phase 2, item 3)
+    # ------------------------------------------------------------------
+
+    async def broadcast_proposal(
+        self,
+        proposal: Dict[str, Any],
+        submitter_peer_id: str,
+    ) -> bool:
+        """
+        Broadcast a governance proposal to the DHT.
+
+        Stores the proposal under ``governance_proposal:{proposal_id}`` so
+        peers can discover and vote on it.  The proposal dict must include
+        ``schemaVersion`` and ``proposalId`` before calling this method.
+
+        To allow discovery without prefix-scan capability, the submitter's
+        peer presence record should list the proposalId in
+        ``"active_proposals"`` — callers are responsible for that update.
+        """
+        dht = self.discovery.get_dht()
+        if not dht:
+            return False
+        proposal_id = proposal.get("proposalId", "")
+        result = await dht.store(
+            f"governance_proposal:{proposal_id}",
+            {**proposal, "schemaVersion": GOVERNANCE_SCHEMA_VERSION},
+            ttl=7 * 24 * 3600.0,  # proposals live for the full voting window
+        )
+        if result:
+            self.emit_feed({
+                "type": "governance_proposal_broadcast",
+                "proposalId": proposal_id,
+                "proposerId": submitter_peer_id,
+                "timestamp": time.time(),
+            })
+        return result
+
+    async def poll_proposals(
+        self, known_ids: Iterable[str] = ()
+    ) -> List[Dict[str, Any]]:
+        """
+        Scan the DHT for governance proposals posted by known peers.
+
+        Checks each trusted peer's presence record for ``"active_proposals"``
+        — a list of proposal IDs that peer has submitted.  Returns raw
+        proposal dicts for any IDs not already in *known_ids*.
+        Unknown schemaVersions are skipped.
+        """
+        dht = self.discovery.get_dht()
+        if not dht:
+            return []
+
+        skip = set(known_ids)
+        proposals: List[Dict[str, Any]] = []
+
+        for peer_id in self.list_trusted_peers(min_score=0.0):
+            presence = await self.fetch_peer_presence(peer_id)
+            if not presence:
+                continue
+            for proposal_id in presence.get("active_proposals", []):
+                if proposal_id in skip:
+                    continue
+                raw = await dht.find_value(f"governance_proposal:{proposal_id}")
+                if not raw:
+                    continue
+                if raw.get("schemaVersion", 0) != GOVERNANCE_SCHEMA_VERSION:
+                    logger.debug(
+                        "Skipping proposal %s: unsupported schemaVersion %d",
+                        proposal_id[:16], raw.get("schemaVersion", 0),
+                    )
+                    continue
+                proposals.append(raw)
+                skip.add(proposal_id)
+
+        return proposals
+
+    async def broadcast_vote(
+        self,
+        vote: Dict[str, Any],
+    ) -> bool:
+        """
+        Broadcast a vote to the DHT.
+
+        Stored under ``governance_vote:{proposal_id}:{voter_id}`` so each
+        peer's vote is individually addressable.  The vote dict must include
+        ``proposalId`` and ``voterId``.
+        """
+        dht = self.discovery.get_dht()
+        if not dht:
+            return False
+        proposal_id = vote.get("proposalId", "")
+        voter_id = vote.get("voterId", "")
+        result = await dht.store(
+            f"governance_vote:{proposal_id}:{voter_id}",
+            {**vote, "schemaVersion": GOVERNANCE_SCHEMA_VERSION},
+            ttl=7 * 24 * 3600.0,
+        )
+        if result:
+            self.emit_feed({
+                "type": "governance_vote_broadcast",
+                "proposalId": proposal_id,
+                "voterId": voter_id,
+                "approve": vote.get("approve"),
+                "timestamp": time.time(),
+            })
+        return result
+
+    async def poll_votes(
+        self, proposal_id: str, peer_ids: Iterable[str]
+    ) -> List[Dict[str, Any]]:
+        """
+        Collect votes from known peers for a given proposal.
+
+        Queries ``governance_vote:{proposal_id}:{peer_id}`` for each peer in
+        *peer_ids*.  Returns raw vote dicts for peers who have voted.
+        """
+        dht = self.discovery.get_dht()
+        if not dht:
+            return []
+
+        votes: List[Dict[str, Any]] = []
+        for peer_id in peer_ids:
+            raw = await dht.find_value(f"governance_vote:{proposal_id}:{peer_id}")
+            if raw and raw.get("schemaVersion", 0) == GOVERNANCE_SCHEMA_VERSION:
+                votes.append(raw)
+        return votes
+
+    async def broadcast_accepted_rules(
+        self, rules: Dict[str, Any], broadcaster_peer_id: str
+    ) -> bool:
+        """
+        Propagate the current accepted ruleset after a successful tally.
+
+        Stored under ``governance_accepted_rules`` in the DHT so newly
+        joining nodes can bootstrap their governance state.
+        """
+        dht = self.discovery.get_dht()
+        if not dht:
+            return False
+        result = await dht.store(
+            "governance_accepted_rules",
+            {**rules, "schemaVersion": GOVERNANCE_SCHEMA_VERSION},
+            ttl=30 * 24 * 3600.0,  # accepted rules are long-lived
+        )
+        if result:
+            self.emit_feed({
+                "type": "governance_rules_broadcast",
+                "broadcasterId": broadcaster_peer_id,
+                "timestamp": time.time(),
+            })
+        return result
+
+    async def fetch_accepted_rules(self) -> Optional[Dict[str, Any]]:
+        """Retrieve the network's current accepted ruleset from the DHT."""
+        dht = self.discovery.get_dht()
+        if not dht:
+            return None
+        return await dht.find_value("governance_accepted_rules")
 
     def list_trusted_peers(self, min_score: float = 0.7) -> List[str]:
         return [

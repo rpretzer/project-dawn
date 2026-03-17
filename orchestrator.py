@@ -22,9 +22,11 @@ from data_paths import data_root
 from compute import generate_proof_of_logits, generate_action_proof, persist_work_result, synthetic_logits_provider
 from discovery import SovereignDiscovery
 from reputation import ReputationManager
-from communication import AgentGossip, AgentManifest, SEED_OFFER_PROTOCOL
+from communication import AgentGossip, AgentManifest, SEED_OFFER_PROTOCOL, GOVERNANCE_PROTOCOL
 from agents.sensing_agent import SensingAgent
 from agents.replication_agent import ReplicationAgent
+from agents.governance import GovernanceAgent
+from agents.innovation_agent import InnovationAgent
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ CONSENSUS_TTL_SECONDS = 60 * 60
 PROCESSED_RETENTION_SECONDS = 24 * 60 * 60
 HANDSHAKE_INTERVAL_SECONDS = 60.0
 SENSING_SCAN_INTERVAL_SECONDS = 60.0
+GOVERNANCE_POLL_INTERVAL_SECONDS = 300.0  # 5 minutes; governance moves slowly
 DHT_BACKOFF_MIN_SECONDS = 2.0
 DHT_BACKOFF_MAX_SECONDS = 60.0
 MAX_TASK_ATTEMPTS = 3
@@ -104,6 +107,7 @@ class Orchestrator:
         self._handshakes: Dict[str, Dict[str, Any]] = {}
         self._last_handshake = 0.0
         self._last_sensing_scan = 0.0
+        self._last_governance_poll = 0.0
         self._sensing_agent = SensingAgent(
             mesh_dir=self.mesh_dir,
             pressure_threshold=self._sensing_pressure_threshold(),
@@ -113,6 +117,17 @@ class Orchestrator:
             vault_dir=self.vault_dir,
             gossip=self.gossip,
             sensing_agent=self._sensing_agent,
+        )
+        self._governance_agent = GovernanceAgent(
+            peer_id=self.peer_id,
+            gossip=self.gossip,
+            reputation_manager=self.reputation,
+            data_dir=self.data_dir,
+        )
+        self._innovation_agent = InnovationAgent(
+            mesh_dir=self.mesh_dir,
+            commons_balance_fn=lambda: self._replication_agent.commons.balance,
+            data_dir=self.data_dir,
         )
         # Track seed offer IDs we have already evaluated to avoid re-processing.
         self._seen_seed_offer_ids: set = set()
@@ -495,6 +510,39 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("SensingAgent scan failed: %s", exc)
 
+    def _maybe_probe(self) -> None:
+        """
+        Issue innovation probes if the commons balance exceeds the floor.
+
+        The InnovationAgent gates itself on the commons balance, so this
+        method is safe to call every cycle — it is a no-op when the balance
+        is below the floor or when there are no blank regions to probe.
+        """
+        try:
+            self._innovation_agent.probe(self.inbox_dir)
+        except Exception as exc:
+            logger.warning("InnovationAgent probe failed: %s", exc)
+
+    async def _poll_governance(self) -> None:
+        """
+        Governance poll cycle — called each iteration of the main run loop.
+
+        Runs at most once every GOVERNANCE_POLL_INTERVAL_SECONDS (default 5 min)
+        so that governance deliberation is not drowned out by compute churn.
+        """
+        if time.time() - self._last_governance_poll < GOVERNANCE_POLL_INTERVAL_SECONDS:
+            return
+        self._last_governance_poll = time.time()
+        try:
+            summary = await self._governance_agent.poll()
+            if any(summary.get(k) for k in ("ingested", "voted", "accepted")):
+                logger.info(
+                    "Governance poll: ingested=%d voted=%d accepted=%s",
+                    summary["ingested"], summary["voted"], summary["accepted"],
+                )
+        except Exception as exc:
+            logger.warning("Governance poll failed: %s", exc)
+
     async def _poll_seed_protocol(self) -> None:
         """
         Poll for incoming seed offers, evaluate consent, respond, and store
@@ -820,12 +868,14 @@ class Orchestrator:
             peer_id=self.peer_id,
             status="online",
             capabilities=["compute", "proof-of-logits"],
-            protocols=[SEED_OFFER_PROTOCOL],
+            protocols=[SEED_OFFER_PROTOCOL, GOVERNANCE_PROTOCOL],
         )
         try:
             while self._running:
                 await self._maybe_broadcast_handshake()
                 await self._maybe_sensing_scan()
+                await self._poll_governance()
+                self._maybe_probe()
                 await self._poll_seed_protocol()
                 await self.run_once()
                 await self.sync_peer_results_from_dht()

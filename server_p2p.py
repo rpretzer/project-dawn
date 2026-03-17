@@ -140,8 +140,8 @@ async def main():
     # Merge: env var overrides, then config, deduplicated in order.
     bootstrap_nodes = list(dict.fromkeys(_env_bootstrap + cfg_bootstrap)) or None
 
-    # DHT: opt-in via env var (recommended once the network has multiple nodes).
-    enable_dht = os.getenv("PROJECT_DAWN_ENABLE_DHT", "false").lower() == "true"
+    # DHT: enabled by default; set PROJECT_DAWN_ENABLE_DHT=false to disable.
+    enable_dht = os.getenv("PROJECT_DAWN_ENABLE_DHT", "true").lower() == "true"
 
     if bootstrap_nodes:
         logger.info(f"Bootstrap nodes: {bootstrap_nodes}")
