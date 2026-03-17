@@ -1,7 +1,7 @@
 {
   "build": {
     "beforeDevCommand": "",
-    "beforeBuildCommand": "",
+    "beforeBuildCommand": "python ../scripts/build_python_sidecar.py",
     "devPath": "../frontend",
     "distDir": "../frontend",
     "withGlobalTauri": false
@@ -46,9 +46,6 @@
       "resources": [
         "sidecar/project-dawn-server",
         "sidecar/project-dawn-server.sha256"
-      ],
-      "externalBin": [
-        "bin/project-dawn-server"
       ],
       "copyright": "",
       "category": "Utility",

@@ -35,23 +35,81 @@ _For strategic context see PLAN.md. For milestone definitions see ROADMAP.md._
 
 ## Priority 1 — Packaging (Public Beta gate)
 
-### 1.1 Fix Python sidecar build
-**File:** `scripts/build_python_sidecar.py`
+### How the sidecar mechanism works
 
-Build script exists but has never produced a tested distributable. Run it, fix failures.
-Output must include SHA-256 checksum that matches what `src-tauri/` verifies.
+`main.rs` uses manual path resolution (not Tauri's `new_sidecar()`):
+1. Looks for the executable at `{resource_dir}/sidecar/project-dawn-server[.exe]`
+2. Reads `{resource_dir}/sidecar/project-dawn-server[.exe].sha256`
+3. Verifies SHA-256 before launching
+
+`tauri.conf.json` bundles the sidecar via `resources` (not `externalBin`, which was
+removed — it was declared but never used). `beforeBuildCommand` now runs the
+PyInstaller step automatically when `cargo tauri build` is invoked.
+
+### 1.1 Run the sidecar build and verify output
+
+```bash
+cd /path/to/project-dawn
+python scripts/build_python_sidecar.py
+# Expect: src-tauri/sidecar/project-dawn-server (binary)
+#         src-tauri/sidecar/project-dawn-server.sha256
+ls -lh src-tauri/sidecar/
+```
+
+The build script writes the SHA-256 checksum automatically. Verify `main.rs`
+can find and verify it before proceeding to a full Tauri build.
+
+Known PyInstaller pitfalls for this codebase:
+- `asyncio`, `websockets`, `zeroconf` all use dynamic imports — add `--hidden-import`
+  entries in `build_python_sidecar.py` if the built binary crashes on startup
+- `config/` and `data/` directories must either be bundled with `--add-data` or
+  resolved relative to the executable at runtime (not `__file__`)
+- Test the built binary standalone before wrapping it in Tauri:
+  ```bash
+  src-tauri/sidecar/project-dawn-server --help
+  ```
 
 ### 1.2 Platform builds
-Test on macOS first. Then Linux (`.deb` / `.AppImage`). Then Windows (`.msi`).
-For each platform:
-- Build runs to completion without `continue-on-error: true`
-- Installer launches without OS security warnings (requires code signing)
-- Node starts, generates identity, finds local peers
 
-### 1.3 Code signing
-- macOS: Apple Developer ID + notarization
-- Windows: Authenticode certificate
-- Linux: AppImage signing (optional)
+PyInstaller produces platform-native binaries — **you cannot cross-compile**.
+Each platform requires its own CI runner.
+
+Recommended CI matrix (GitHub Actions):
+
+```yaml
+strategy:
+  matrix:
+    include:
+      - os: ubuntu-22.04   → project-dawn-server (ELF), .deb / .AppImage
+      - os: macos-13       → project-dawn-server (Mach-O), .dmg
+      - os: windows-2022   → project-dawn-server.exe, .msi
+```
+
+For each platform, the full sequence is:
+1. `pip install -r requirements.txt pyinstaller`
+2. `python scripts/build_python_sidecar.py`
+3. `cargo tauri build`
+4. Smoke test: launch installer, start app, verify node identity is generated
+
+### 1.3 Audit and remove `src-tauri/bin/`
+
+`src-tauri/bin/project-dawn-server-x86_64-unknown-linux-gnu` is a stripped ELF
+with no documented provenance. It was likely placed there manually during early
+development. It is no longer referenced by `tauri.conf.json` (the `externalBin`
+entry has been removed).
+
+**Action:** Verify it is not needed, then delete it and remove the `bin/` directory.
+Do not commit binaries of unknown origin into the repository.
+
+### 1.4 Code signing
+
+Required to distribute without OS security warnings:
+- **macOS**: Apple Developer ID Application certificate + `xcrun notarytool` notarization.
+  Set `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`
+  in CI secrets. Tauri handles signing automatically when these are set.
+- **Windows**: Authenticode certificate (EV cert required for SmartScreen reputation).
+  Set `WINDOWS_CERTIFICATE` and `WINDOWS_CERTIFICATE_PASSWORD` in CI secrets.
+- **Linux**: No signing required for `.deb`; AppImage signing is optional.
 
 ---
 
@@ -71,7 +129,7 @@ For each platform:
 ```bash
 # Verify clean state
 git checkout claude/review-project-codebase-WtWY3
-python -m pytest -q           # should be 381 passed, 5 skipped
+python -m pytest -q           # should be 435 passed, 5 skipped
 
 # Run with DHT enabled and bootstrap nodes
 PROJECT_DAWN_ENABLE_DHT=true \
