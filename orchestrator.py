@@ -523,12 +523,53 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("InnovationAgent probe failed: %s", exc)
 
+    def _known_offered_seed_ids(self) -> List[str]:
+        """Return seed IDs this node is currently offering via the seed protocol."""
+        try:
+            return [s.seedId for s in self._replication_agent._seed_manager.list_seeds(status="dormant")]
+        except Exception:
+            return []
+
+    async def _refresh_presence(self) -> None:
+        """
+        Re-broadcast this node's presence record with current metadata.
+
+        Called after governance or seed state changes so that peers can
+        discover active proposals and seed offers via poll_proposals() and
+        poll_seed_offers() without requiring prefix-scan DHT support.
+        """
+        active_proposals = self._governance_agent.active_proposal_ids()
+        offered_seeds = self._known_offered_seed_ids()
+        await self.gossip.broadcast_presence(
+            peer_id=self.peer_id,
+            status="online",
+            capabilities=["compute", "proof-of-logits"],
+            protocols=[SEED_OFFER_PROTOCOL, GOVERNANCE_PROTOCOL],
+            # Extra fields read by poll_proposals() and poll_seed_offers():
+            timestamp=time.time(),
+        )
+        # broadcast_presence does not forward arbitrary kwargs, so store
+        # the extended fields by calling the DHT directly.
+        dht = self.discovery.get_dht()
+        if dht:
+            presence_extra = {
+                "peerId": self.peer_id,
+                "status": "online",
+                "capabilities": ["compute", "proof-of-logits"],
+                "protocols": [SEED_OFFER_PROTOCOL, GOVERNANCE_PROTOCOL],
+                "active_proposals": active_proposals,
+                "offered_seeds": offered_seeds,
+                "timestamp": time.time(),
+            }
+            await dht.store(f"presence:{self.peer_id}", presence_extra, ttl=3600.0)
+
     async def _poll_governance(self) -> None:
         """
         Governance poll cycle — called each iteration of the main run loop.
 
         Runs at most once every GOVERNANCE_POLL_INTERVAL_SECONDS (default 5 min)
         so that governance deliberation is not drowned out by compute churn.
+        After polling, re-broadcasts presence so peers see updated active_proposals.
         """
         if time.time() - self._last_governance_poll < GOVERNANCE_POLL_INTERVAL_SECONDS:
             return
@@ -540,6 +581,8 @@ class Orchestrator:
                     "Governance poll: ingested=%d voted=%d accepted=%s",
                     summary["ingested"], summary["voted"], summary["accepted"],
                 )
+            # Refresh presence so peers can discover any new active proposals.
+            await self._refresh_presence()
         except Exception as exc:
             logger.warning("Governance poll failed: %s", exc)
 
@@ -864,12 +907,7 @@ class Orchestrator:
     async def run(self, poll_interval: float = 5.0) -> None:
         self._running = True
         self.start_discovery()
-        await self.gossip.broadcast_presence(
-            peer_id=self.peer_id,
-            status="online",
-            capabilities=["compute", "proof-of-logits"],
-            protocols=[SEED_OFFER_PROTOCOL, GOVERNANCE_PROTOCOL],
-        )
+        await self._refresh_presence()
         try:
             while self._running:
                 await self._maybe_broadcast_handshake()
@@ -884,6 +922,12 @@ class Orchestrator:
                 for receipt_path in receipts:
                     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
                     await self.broadcast_consensus_receipt(receipt["taskId"], receipt)
+                    # Notify the InnovationAgent so it can record probe outcomes
+                    # and update the capability map.
+                    self._innovation_agent.report(
+                        task_id=receipt["taskId"],
+                        success=bool(receipt.get("accepted")),
+                    )
                 self.cleanup_stale_files()
                 jitter = 1 + random.uniform(0, self._poll_jitter)
                 await asyncio.sleep(poll_interval * jitter)

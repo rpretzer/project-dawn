@@ -355,7 +355,6 @@ class SeedManager:
                 generation=blueprint.generation,
                 capabilityDeclarations=blueprint.capabilityDeclarations,
                 governingValues=merged,
-                protocolContracts=blueprint.protocolContracts,
             )
 
         seed_id = _derive_seed_id(blueprint)

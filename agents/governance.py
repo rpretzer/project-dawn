@@ -479,9 +479,12 @@ class GovernanceAgent:
         rationale: str = "",
     ) -> Optional[Proposal]:
         """
-        Submit a governance proposal as this node.
+        Submit a governance proposal locally (reputation-gated).
 
-        Reputation-gated: uses the node's own current reputation score.
+        This saves the proposal to disk but does NOT broadcast it to the
+        network.  Call announce_proposal() when you need full DHT broadcast
+        plus presence update so peers can discover and vote on the proposal.
+
         Returns the Proposal object, or None if the reputation gate blocks it.
         """
         rep = self.reputation_manager.get_peer(self.peer_id)
@@ -493,6 +496,43 @@ class GovernanceAgent:
             proposed_value=proposed_value,
             rationale=rationale,
         )
+
+    async def announce_proposal(
+        self,
+        rule_key: str,
+        proposed_value: Any,
+        rationale: str = "",
+    ) -> Optional[Proposal]:
+        """
+        Submit a proposal and broadcast it to the network.
+
+        Saves locally via submit_proposal(), then:
+        1. Broadcasts the proposal to the DHT under
+           ``governance_proposal:{proposalId}``.
+        2. Returns the Proposal so the caller can surface the proposal ID
+           for inclusion in the next presence broadcast.
+
+        Callers should follow up with a presence re-broadcast that includes
+        this proposal's ID in ``active_proposals`` so peers can discover it
+        via poll_proposals().  The orchestrator's _poll_governance() handles
+        this automatically through _build_presence_payload().
+        """
+        proposal = self.submit_proposal(rule_key, proposed_value, rationale)
+        if proposal is None:
+            return None
+        await self.gossip.broadcast_proposal(
+            proposal=proposal.to_dict(),
+            submitter_peer_id=self.peer_id,
+        )
+        return proposal
+
+    def active_proposal_ids(self) -> List[str]:
+        """Return IDs of all pending proposals submitted by this node."""
+        return [
+            p.proposalId
+            for p in self.manager.list_proposals(status="pending")
+            if p.proposerId == self.peer_id
+        ]
 
     def cast_vote(
         self,
